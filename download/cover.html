@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShadowHint Analysis Cover</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;700;900&family=Noto+Sans+SC:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  @page { size: 794px 1123px; margin: 0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 794px;
+    height: 1123px;
+    margin: 0;
+    padding: 0;
+    background: #ffffff;
+  }
+  @media screen {
+    html { height: auto; display: flex; justify-content: center; }
+    body { transform-origin: top center; scale: min(1, calc(100vh / 1123)); margin: 0 auto; }
+  }
+  .cover {
+    position: relative;
+    width: 794px;
+    height: 1123px;
+    background: #ffffff;
+  }
+  /* Layer 1: Background grid */
+  .bg-layer {
+    position: absolute;
+    inset: 0;
+    overflow: hidden;
+    z-index: 1;
+  }
+  .grid-pattern {
+    position: absolute;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(78, 38, 199, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(78, 38, 199, 0.03) 1px, transparent 1px);
+    background-size: 50px 50px;
+  }
+  /* Layer 2: Structure lines */
+  .structure-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+  }
+  .thick-line {
+    position: absolute;
+    left: 95px;
+    top: 112px;
+    width: 6px;
+    height: 898px;
+    background: #4e26c7;
+  }
+  .meta-line {
+    position: absolute;
+    left: 130px;
+    top: 770px;
+    width: 300px;
+    height: 1px;
+    background: rgba(78, 38, 199, 0.4);
+  }
+  /* Layer 3: Content */
+  .content-layer {
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+  }
+  .kicker {
+    position: absolute;
+    left: 130px;
+    top: 168px;
+    font-family: 'Inter', sans-serif;
+    font-size: 16px;
+    font-weight: 400;
+    letter-spacing: 3px;
+    color: rgba(33, 35, 36, 0.6);
+    text-transform: uppercase;
+  }
+  .hero-title {
+    position: absolute;
+    left: 130px;
+    top: 336px;
+    font-family: 'Inter', sans-serif;
+    font-size: 52px;
+    font-weight: 900;
+    line-height: 1.15;
+    color: #212324;
+    max-width: 480px;
+  }
+  .hero-title .accent {
+    color: #4e26c7;
+  }
+  .summary {
+    position: absolute;
+    left: 130px;
+    top: 560px;
+    font-family: 'Noto Sans SC', 'Inter', sans-serif;
+    font-size: 17px;
+    font-weight: 400;
+    line-height: 1.6;
+    color: rgba(33, 35, 36, 0.85);
+    max-width: 480px;
+  }
+  .meta {
+    position: absolute;
+    left: 130px;
+    top: 800px;
+    font-family: 'Inter', sans-serif;
+    font-size: 18px;
+    font-weight: 400;
+    line-height: 1.8;
+    color: #72797e;
+  }
+</style>
+</head>
+<body>
+<div class="cover">
+  <!-- Layer 1: Background -->
+  <div class="bg-layer">
+    <div class="grid-pattern"></div>
+  </div>
+  <!-- Layer 2: Structure -->
+  <div class="structure-layer">
+    <div class="thick-line"></div>
+    <div class="meta-line"></div>
+  </div>
+  <!-- Layer 3: Content -->
+  <div class="content-layer">
+    <div class="kicker">TECHNICAL ANALYSIS REPORT</div>
+    <div class="hero-title">ShadowHint<br/><span class="accent">Analysis</span> &amp; MVP</div>
+    <div class="summary">Анализ архитектуры, функций и бизнес-модели ИИ-ассистента для собеседований. Пошаговый план реализации MVP как постоянно слушающего интерактивного помощника.</div>
+    <div class="meta">Подготовлено: Z.ai<br/>Дата: 10 июня 2026<br/>Версия: 1.0</div>
+  </div>
+</div>
+</body>
+</html>
