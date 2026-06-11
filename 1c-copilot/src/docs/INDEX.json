@@ -1,9 +1,9 @@
 {
   "project": "1C-Copilot",
-  "version": "v0.0.1-alpha",
+  "version": "v0.0.1-alpha (Аудит и реанимация)",
   "last_updated": "2026-06-11",
   "prod": "N/A — проект не собирается",
-  "repo": "TBD (локальный репозиторий)",
+  "repo": "https://github.com/Antisakrum2004/copilot",
   "stack": "Electron 31 + React 18 + TypeScript 5.7 + electron-vite 2.3 + electron-store 8.2",
   "critical_first": {
     "api_quirks": "02-api-quirks.md",
