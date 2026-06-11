@@ -1,10 +1,10 @@
 {
   "project": "1C-Copilot",
-  "version": "V100",
+  "version": "v0.0.1-alpha",
   "last_updated": "2026-06-11",
-  "prod": "N/A (десктопное Electron-приложение)",
+  "prod": "N/A — проект не собирается",
   "repo": "TBD (локальный репозиторий)",
-  "stack": "Electron 31 + React 18 + TypeScript 5.7 + electron-vite 2.3 + Tailwind-подобные CSS-переменные + electron-store 8.2",
+  "stack": "Electron 31 + React 18 + TypeScript 5.7 + electron-vite 2.3 + electron-store 8.2",
   "critical_first": {
     "api_quirks": "02-api-quirks.md",
     "coding_rules": "08-coding-rules.md",
@@ -33,19 +33,19 @@
       "file": "04-current-state.md",
       "title": "Текущее состояние",
       "topics": ["версии", "реализовано", "не реализовано", "история"],
-      "keywords": ["V100", "Шаг 3", "аудио-захват", "STT", "LLM"]
+      "keywords": ["v0.0.1-alpha", "не собирается", "UNMET", "мёртвый код"]
     },
     {
       "file": "05-known-issues.md",
       "title": "Известные проблемы и техдолг",
-      "topics": ["баги", "ограничения", "техдолг"],
-      "keywords": ["WASAPI", "ffmpeg fallback", "rate limit", "win-audio-capture"]
+      "topics": ["баги", "ограничения", "техдолг", "блокирующие проблемы"],
+      "keywords": ["WASAPI dead code", "UNMET", "tsconfig", "ffmpeg zombie"]
     },
     {
       "file": "06-attempts-failures.md",
       "title": "Что НЕ сработало",
       "topics": ["провалы", "ошибки", "обходные пути"],
-      "keywords": ["Stereo Mix", "BlackHole", "native module"]
+      "keywords": ["Stereo Mix", "BlackHole", "native module", "raw PCM"]
     },
     {
       "file": "07-decisions.md",
@@ -63,7 +63,7 @@
       "file": "09-next-steps.md",
       "title": "Следующие шаги",
       "topics": ["приоритеты", "задачи", "баги", "фичи"],
-      "keywords": ["hotkey", "tray", "автообновление", "логирование"]
+      "keywords": ["npm install", "tsconfig", "WASAPI fix", "первый запуск"]
     }
   ],
   "files": {
@@ -71,150 +71,103 @@
       "path": "src/main/index.ts",
       "lines": 33,
       "size_kb": 0.8,
-      "role": "Точка входа Electron main-процесса. Запрос single-instance lock, создание окон, регистрация IPC."
+      "role": "Точка входа Electron main-процесса. БАГ: cleanup() не зарегистрирован."
     },
     "src/main/ipc/handlers.ts": {
       "path": "src/main/ipc/handlers.ts",
       "lines": 341,
       "size_kb": 11.1,
-      "role": "Центральный реестр IPC-обработчиков. Создание окон, пайплайн audio→STT→LLM, все handle/on."
+      "role": "IPC-обработчики. Написаны, подключены. Мелкие проблемы с хардкод-строками."
     },
     "src/main/store/settings.ts": {
       "path": "src/main/store/settings.ts",
       "lines": 23,
       "size_kb": 0.6,
-      "role": "Обёртка над electron-store. CRUD настроек (API ключи, модель, прозрачность, ширина)."
+      "role": "electron-store обёртка. Выглядит рабочей."
     },
     "src/main/windows/overlayWindow.ts": {
       "path": "src/main/windows/overlayWindow.ts",
       "lines": 105,
       "size_kb": 3.0,
-      "role": "Фабрика overlay-окон (toolbar, suggestion, transcript). alwaysOnTop, transparent, frameless."
+      "role": "Фабрика overlay-окон. Выглядит рабочей."
     },
     "src/main/services/audioCapture.ts": {
       "path": "src/main/services/audioCapture.ts",
       "lines": 424,
       "size_kb": 14.5,
-      "role": "Сервис аудио-захвата. WASAPI loopback + ffmpeg fallback. Нарезка чанков 6с, 16kHz Mono 16-bit PCM."
+      "role": "Аудио-захват. КРИТИЧЕСКИЙ БАГ: WASAPI — мёртвый код. startCapture() всегда true. ffmpeg process не сохраняется."
     },
     "src/main/services/openrouterService.ts": {
       "path": "src/main/services/openrouterService.ts",
       "lines": 292,
       "size_kb": 11.4,
-      "role": "Сервис OpenRouter LLM. Streaming SSE, системный промпт 1С, авто-подсказки при паузе, история."
+      "role": "OpenRouter стриминг. БАГ: suggestionHistory без user-пар. Не тестировалось."
     },
     "src/main/services/sttService.ts": {
       "path": "src/main/services/sttService.ts",
       "lines": 307,
       "size_kb": 10.1,
-      "role": "Сервис STT (Groq/OpenAI Whisper). Очередь чанков, PCM→WAV конвертация, multipart upload."
+      "role": "STT сервис. БАГ: дублирующая отправка, fetch с Buffer. Не тестировалось."
     },
     "src/shared/ipc.ts": {
       "path": "src/shared/ipc.ts",
       "lines": 94,
       "size_kb": 2.7,
-      "role": "Общие IPC-каналы, типы (AppSettings, TranscriptionUpdatePayload, SuggestionUpdatePayload), DEFAULT_SETTINGS."
+      "role": "IPC-каналы и типы. Выглядит корректным."
     },
     "src/preload/index.ts": {
       "path": "src/preload/index.ts",
       "lines": 132,
       "size_kb": 5.9,
-      "role": "Preload-скрипт. contextBridge.exposeInMainWorld('copilot', api). Типобезопасный IPC-мост."
+      "role": "Preload-скрипт, contextBridge. Выглядит корректным."
     },
     "src/renderer/src/App.tsx": {
       "path": "src/renderer/src/App.tsx",
       "lines": 56,
       "size_kb": 1.8,
-      "role": "Роутер renderer. Hash-based routing: #/toolbar, #/suggestion, #/transcript."
+      "role": "Hash-based роутер. Выглядит рабочим."
     },
     "src/renderer/src/components/SettingsPanel.tsx": {
       "path": "src/renderer/src/components/SettingsPanel.tsx",
       "lines": 182,
       "size_kb": 5.2,
-      "role": "Панель настроек. API ключи, провайдер STT, модель LLM, прозрачность/ширина оверлея."
+      "role": "Панель настроек. Выглядит рабочей."
     },
     "src/renderer/src/components/Toolbar.tsx": {
       "path": "src/renderer/src/components/Toolbar.tsx",
       "lines": 94,
       "size_kb": 3.1,
-      "role": "Тулбар. Кнопки: Слушать/Стоп, Подсказки, Текст, Настройки. Drag-to-move."
+      "role": "Тулбар. Выглядит рабочим."
     },
     "src/renderer/src/components/SuggestionPanel.tsx": {
       "path": "src/renderer/src/components/SuggestionPanel.tsx",
       "lines": 102,
       "size_kb": 3.3,
-      "role": "Панель подсказок 1С. Подписка на streaming, кнопки «Спросить ИИ» / «Стоп»."
+      "role": "Панель подсказок. Нет Markdown-рендеринга."
     },
     "src/renderer/src/components/TranscriptPanel.tsx": {
       "path": "src/renderer/src/components/TranscriptPanel.tsx",
       "lines": 86,
       "size_kb": 2.6,
-      "role": "Панель расшифровки. Подписка на transcription:update, список строк с speaker-метками."
-    },
-    "src/renderer/src/styles/theme.css": {
-      "path": "src/renderer/src/styles/theme.css",
-      "lines": 52,
-      "size_kb": 1.5,
-      "role": "CSS-переменные. Material Dark палитра, glass-morphism, spacing, typography."
-    },
-    "src/renderer/src/styles/global.css": {
-      "path": "src/renderer/src/styles/global.css",
-      "lines": 95,
-      "size_kb": 1.9,
-      "role": "Глобальные стили. Reset, glass-panel, glass-card, кнопки, scroll-y."
-    },
-    "src/renderer/src/main.tsx": {
-      "path": "src/renderer/src/main.tsx",
-      "lines": 10,
-      "size_kb": 0.2,
-      "role": "Точка входа renderer. ReactDOM.createRoot, StrictMode."
-    },
-    "src/renderer/index.html": {
-      "path": "src/renderer/index.html",
-      "lines": 12,
-      "size_kb": 0.3,
-      "role": "HTML-шаблон renderer. lang=ru, charset=UTF-8."
-    },
-    "electron.vite.config.ts": {
-      "path": "electron.vite.config.ts",
-      "lines": 27,
-      "size_kb": 0.6,
-      "role": "Конфиг electron-vite. Алиасы @shared и @renderer, externalizeDeps для main/preload."
-    },
-    "package.json": {
-      "path": "package.json",
-      "lines": 30,
-      "size_kb": 0.8,
-      "role": "Зависимости проекта. win-audio-capture (только в src/), electron-store, React."
-    },
-    "tsconfig.json": {
-      "path": "tsconfig.json",
-      "lines": 7,
-      "size_kb": 0.1,
-      "role": "Корневой tsconfig. Ссылки на tsconfig.node.json и tsconfig.web.json."
+      "role": "Панель расшифровки. Выглядит рабочей."
     }
   },
   "quick_facts": {
+    "CRITICAL_project_cannot_build": "ВСЕ 12 зависимостей UNMET. npm install НИ РАЗУ не выполнялся. Проект не компилируется.",
+    "CRITICAL_missing_configs": "tsconfig.node.json и tsconfig.web.json не существуют — на которые ссылается tsconfig.json",
+    "CRITICAL_waspai_dead_code": "audioCapture.ts: WASAPI loopback — МЁРТВЫЙ КОД. loadNativeLoopback() никогда не вызывается из-за chicken-and-egg бага",
+    "CRITICAL_startCapture_always_true": "startCapture() всегда возвращает true даже если ffmpeg не запустился",
+    "CRITICAL_ffmpeg_zombie": "ffmpeg child process не сохраняется в переменную — нельзя убить при stopCapture()",
+    "CRITICAL_cleanup_not_registered": "cleanup() определена в handlers.ts но НЕ зарегистрирована в app.on('before-quit')",
+    "BUG_stt_duplicate_broadcast": "sttService.ts broadcastTranscription отправляет сообщения дважды в одно окно",
+    "BUG_suggestion_history_format": "openrouterService.ts suggestionHistory хранит только assistant — нарушает формат OpenAI chat",
     "platform_target": "Windows (основной), macOS и Linux — fallback через ffmpeg",
     "audio_format": "16kHz Mono 16-bit PCM LE, чанки по 6 секунд (192 000 байт)",
     "whisper_model_groq": "whisper-large-v3",
-    "whisper_model_openai": "whisper-1",
     "openrouter_default_model": "qwen/qwen-2.5-coder-32b-instruct",
-    "openrouter_url": "https://openrouter.ai/api/v1/chat/completions",
-    "groq_stt_url": "https://api.groq.com/openai/v1/audio/transcriptions",
-    "openai_stt_url": "https://api.openai.com/v1/audio/transcriptions",
-    "ipc_channels_critical": "transcription:update → renderer, suggestion:update-content → renderer",
     "overlay_windows": "3 окна: toolbar (360x64), suggestion (420x320), transcript (380x420)",
-    "settings_storage": "electron-store, JSON-файл 'settings' в userData директории",
-    "stt_language": "ru (жёстко зашит в sttService)",
-    "system_prompt_1c": "Зашил в openrouterService.ts — эксперт по 1С:Предприятие 8, БСП, краткие подсказки в Markdown",
-    "auto_suggestion_silence_ms": 2000 — пауза после последней транскрипции перед отправкой на LLM",
-    "max_context_chars": 12000 — максимум символов контекста для LLM",
-    "min_transcript_length": 20 — минимум символов для отправки на LLM",
-    "suggestion_history_depth": 3 — хранятся последние 3 подсказки для контекста",
-    "win_audio_capture_version": "^1.0.3 — только в src/package.json, НЕ в pkg/",
-    "routing": "Hash-based: #/toolbar, #/suggestion, #/transcript",
-    "mouse_passthrough": "setIgnoreMouseEvents(true, {forward: true}) — клики проходят сквозь прозрачные области",
-    "always_on_top": "Все overlay-окна: alwaysOnTop: true, focusable: false, skipTaskbar: true"
+    "stt_language": "ru (зашил в sttService)",
+    "system_prompt_1c": "Зашил в openrouterService.ts — эксперт по 1С:Предприятие 8",
+    "first_step_to_code": "1. Создать tsconfig.node.json + tsconfig.web.json → 2. npm install → 3. electron-vite build → 4. Исправить WASAPI dead code → 5. Первый запуск"
   }
 }
