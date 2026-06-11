@@ -1,0 +1,220 @@
+{
+  "project": "1C-Copilot",
+  "version": "V100",
+  "last_updated": "2026-06-11",
+  "prod": "N/A (десктопное Electron-приложение)",
+  "repo": "TBD (локальный репозиторий)",
+  "stack": "Electron 31 + React 18 + TypeScript 5.7 + electron-vite 2.3 + Tailwind-подобные CSS-переменные + electron-store 8.2",
+  "critical_first": {
+    "api_quirks": "02-api-quirks.md",
+    "coding_rules": "08-coding-rules.md",
+    "known_issues": "05-known-issues.md"
+  },
+  "docs": [
+    {
+      "file": "01-overview.md",
+      "title": "Обзор проекта",
+      "topics": ["архитектура", "стек", "поток данных", "зависимости"],
+      "keywords": ["Electron", "React", "overlay", "WASAPI", "Whisper", "OpenRouter"]
+    },
+    {
+      "file": "02-api-quirks.md",
+      "title": "Ловушки внешних API",
+      "topics": ["Groq Whisper", "OpenAI Whisper", "OpenRouter", "multipart", "SSE streaming"],
+      "keywords": ["API", "rate limit", "multipart/form-data", "streaming", "whisper-large-v3"]
+    },
+    {
+      "file": "03-modules.md",
+      "title": "Модули проекта",
+      "topics": ["файлы", "функции", "связи", "IPC"],
+      "keywords": ["audioCapture", "sttService", "openrouterService", "handlers", "overlayWindow"]
+    },
+    {
+      "file": "04-current-state.md",
+      "title": "Текущее состояние",
+      "topics": ["версии", "реализовано", "не реализовано", "история"],
+      "keywords": ["V100", "Шаг 3", "аудио-захват", "STT", "LLM"]
+    },
+    {
+      "file": "05-known-issues.md",
+      "title": "Известные проблемы и техдолг",
+      "topics": ["баги", "ограничения", "техдолг"],
+      "keywords": ["WASAPI", "ffmpeg fallback", "rate limit", "win-audio-capture"]
+    },
+    {
+      "file": "06-attempts-failures.md",
+      "title": "Что НЕ сработало",
+      "topics": ["провалы", "ошибки", "обходные пути"],
+      "keywords": ["Stereo Mix", "BlackHole", "native module"]
+    },
+    {
+      "file": "07-decisions.md",
+      "title": "Решения и обоснования",
+      "topics": ["архитектурные решения", "альтернативы", "обоснования"],
+      "keywords": ["overlay", "streaming", "chunk size", "context window"]
+    },
+    {
+      "file": "08-coding-rules.md",
+      "title": "Как писать код",
+      "topics": ["стиль", "конвенции", "API", "CSS", "принципы"],
+      "keywords": ["TypeScript", "IPC", "electron-store", "preload", "contextBridge"]
+    },
+    {
+      "file": "09-next-steps.md",
+      "title": "Следующие шаги",
+      "topics": ["приоритеты", "задачи", "баги", "фичи"],
+      "keywords": ["hotkey", "tray", "автообновление", "логирование"]
+    }
+  ],
+  "files": {
+    "src/main/index.ts": {
+      "path": "src/main/index.ts",
+      "lines": 33,
+      "size_kb": 0.8,
+      "role": "Точка входа Electron main-процесса. Запрос single-instance lock, создание окон, регистрация IPC."
+    },
+    "src/main/ipc/handlers.ts": {
+      "path": "src/main/ipc/handlers.ts",
+      "lines": 341,
+      "size_kb": 11.1,
+      "role": "Центральный реестр IPC-обработчиков. Создание окон, пайплайн audio→STT→LLM, все handle/on."
+    },
+    "src/main/store/settings.ts": {
+      "path": "src/main/store/settings.ts",
+      "lines": 23,
+      "size_kb": 0.6,
+      "role": "Обёртка над electron-store. CRUD настроек (API ключи, модель, прозрачность, ширина)."
+    },
+    "src/main/windows/overlayWindow.ts": {
+      "path": "src/main/windows/overlayWindow.ts",
+      "lines": 105,
+      "size_kb": 3.0,
+      "role": "Фабрика overlay-окон (toolbar, suggestion, transcript). alwaysOnTop, transparent, frameless."
+    },
+    "src/main/services/audioCapture.ts": {
+      "path": "src/main/services/audioCapture.ts",
+      "lines": 424,
+      "size_kb": 14.5,
+      "role": "Сервис аудио-захвата. WASAPI loopback + ffmpeg fallback. Нарезка чанков 6с, 16kHz Mono 16-bit PCM."
+    },
+    "src/main/services/openrouterService.ts": {
+      "path": "src/main/services/openrouterService.ts",
+      "lines": 292,
+      "size_kb": 11.4,
+      "role": "Сервис OpenRouter LLM. Streaming SSE, системный промпт 1С, авто-подсказки при паузе, история."
+    },
+    "src/main/services/sttService.ts": {
+      "path": "src/main/services/sttService.ts",
+      "lines": 307,
+      "size_kb": 10.1,
+      "role": "Сервис STT (Groq/OpenAI Whisper). Очередь чанков, PCM→WAV конвертация, multipart upload."
+    },
+    "src/shared/ipc.ts": {
+      "path": "src/shared/ipc.ts",
+      "lines": 94,
+      "size_kb": 2.7,
+      "role": "Общие IPC-каналы, типы (AppSettings, TranscriptionUpdatePayload, SuggestionUpdatePayload), DEFAULT_SETTINGS."
+    },
+    "src/preload/index.ts": {
+      "path": "src/preload/index.ts",
+      "lines": 132,
+      "size_kb": 5.9,
+      "role": "Preload-скрипт. contextBridge.exposeInMainWorld('copilot', api). Типобезопасный IPC-мост."
+    },
+    "src/renderer/src/App.tsx": {
+      "path": "src/renderer/src/App.tsx",
+      "lines": 56,
+      "size_kb": 1.8,
+      "role": "Роутер renderer. Hash-based routing: #/toolbar, #/suggestion, #/transcript."
+    },
+    "src/renderer/src/components/SettingsPanel.tsx": {
+      "path": "src/renderer/src/components/SettingsPanel.tsx",
+      "lines": 182,
+      "size_kb": 5.2,
+      "role": "Панель настроек. API ключи, провайдер STT, модель LLM, прозрачность/ширина оверлея."
+    },
+    "src/renderer/src/components/Toolbar.tsx": {
+      "path": "src/renderer/src/components/Toolbar.tsx",
+      "lines": 94,
+      "size_kb": 3.1,
+      "role": "Тулбар. Кнопки: Слушать/Стоп, Подсказки, Текст, Настройки. Drag-to-move."
+    },
+    "src/renderer/src/components/SuggestionPanel.tsx": {
+      "path": "src/renderer/src/components/SuggestionPanel.tsx",
+      "lines": 102,
+      "size_kb": 3.3,
+      "role": "Панель подсказок 1С. Подписка на streaming, кнопки «Спросить ИИ» / «Стоп»."
+    },
+    "src/renderer/src/components/TranscriptPanel.tsx": {
+      "path": "src/renderer/src/components/TranscriptPanel.tsx",
+      "lines": 86,
+      "size_kb": 2.6,
+      "role": "Панель расшифровки. Подписка на transcription:update, список строк с speaker-метками."
+    },
+    "src/renderer/src/styles/theme.css": {
+      "path": "src/renderer/src/styles/theme.css",
+      "lines": 52,
+      "size_kb": 1.5,
+      "role": "CSS-переменные. Material Dark палитра, glass-morphism, spacing, typography."
+    },
+    "src/renderer/src/styles/global.css": {
+      "path": "src/renderer/src/styles/global.css",
+      "lines": 95,
+      "size_kb": 1.9,
+      "role": "Глобальные стили. Reset, glass-panel, glass-card, кнопки, scroll-y."
+    },
+    "src/renderer/src/main.tsx": {
+      "path": "src/renderer/src/main.tsx",
+      "lines": 10,
+      "size_kb": 0.2,
+      "role": "Точка входа renderer. ReactDOM.createRoot, StrictMode."
+    },
+    "src/renderer/index.html": {
+      "path": "src/renderer/index.html",
+      "lines": 12,
+      "size_kb": 0.3,
+      "role": "HTML-шаблон renderer. lang=ru, charset=UTF-8."
+    },
+    "electron.vite.config.ts": {
+      "path": "electron.vite.config.ts",
+      "lines": 27,
+      "size_kb": 0.6,
+      "role": "Конфиг electron-vite. Алиасы @shared и @renderer, externalizeDeps для main/preload."
+    },
+    "package.json": {
+      "path": "package.json",
+      "lines": 30,
+      "size_kb": 0.8,
+      "role": "Зависимости проекта. win-audio-capture (только в src/), electron-store, React."
+    },
+    "tsconfig.json": {
+      "path": "tsconfig.json",
+      "lines": 7,
+      "size_kb": 0.1,
+      "role": "Корневой tsconfig. Ссылки на tsconfig.node.json и tsconfig.web.json."
+    }
+  },
+  "quick_facts": {
+    "platform_target": "Windows (основной), macOS и Linux — fallback через ffmpeg",
+    "audio_format": "16kHz Mono 16-bit PCM LE, чанки по 6 секунд (192 000 байт)",
+    "whisper_model_groq": "whisper-large-v3",
+    "whisper_model_openai": "whisper-1",
+    "openrouter_default_model": "qwen/qwen-2.5-coder-32b-instruct",
+    "openrouter_url": "https://openrouter.ai/api/v1/chat/completions",
+    "groq_stt_url": "https://api.groq.com/openai/v1/audio/transcriptions",
+    "openai_stt_url": "https://api.openai.com/v1/audio/transcriptions",
+    "ipc_channels_critical": "transcription:update → renderer, suggestion:update-content → renderer",
+    "overlay_windows": "3 окна: toolbar (360x64), suggestion (420x320), transcript (380x420)",
+    "settings_storage": "electron-store, JSON-файл 'settings' в userData директории",
+    "stt_language": "ru (жёстко зашит в sttService)",
+    "system_prompt_1c": "Зашил в openrouterService.ts — эксперт по 1С:Предприятие 8, БСП, краткие подсказки в Markdown",
+    "auto_suggestion_silence_ms": 2000 — пауза после последней транскрипции перед отправкой на LLM",
+    "max_context_chars": 12000 — максимум символов контекста для LLM",
+    "min_transcript_length": 20 — минимум символов для отправки на LLM",
+    "suggestion_history_depth": 3 — хранятся последние 3 подсказки для контекста",
+    "win_audio_capture_version": "^1.0.3 — только в src/package.json, НЕ в pkg/",
+    "routing": "Hash-based: #/toolbar, #/suggestion, #/transcript",
+    "mouse_passthrough": "setIgnoreMouseEvents(true, {forward: true}) — клики проходят сквозь прозрачные области",
+    "always_on_top": "Все overlay-окна: alwaysOnTop: true, focusable: false, skipTaskbar: true"
+  }
+}
