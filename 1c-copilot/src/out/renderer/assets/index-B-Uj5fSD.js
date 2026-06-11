@@ -7223,35 +7223,12 @@ function SuggestionPanel() {
   ] });
 }
 function Toolbar({ recording, onToggleRecording, onOpenSettings }) {
-  const dragRef = reactExports.useRef(null);
-  const onMouseDown = reactExports.useCallback((e) => {
-    if (e.target.closest("[data-no-drag]")) return;
-    dragRef.current = { x: e.screenX, y: e.screenY };
-  }, []);
-  reactExports.useEffect(() => {
-    const onMove = (e) => {
-      if (!dragRef.current) return;
-      const dx = e.screenX - dragRef.current.x;
-      const dy = e.screenY - dragRef.current.y;
-      dragRef.current = { x: e.screenX, y: e.screenY };
-      void window.copilot.window.moveWindow(dx, dy);
-    };
-    const onUp = () => {
-      dragRef.current = null;
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, []);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "toolbar glass-panel", onMouseDown, children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "toolbar glass-panel", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "toolbar-brand", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "toolbar-dot" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "1C Copilot" })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "toolbar-actions", "data-no-drag": true, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "toolbar-actions", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
@@ -7274,7 +7251,8 @@ function Toolbar({ recording, onToggleRecording, onOpenSettings }) {
           padding: var(--spacing-sm) var(--spacing-lg);
           width: 100%;
           height: 100%;
-          -webkit-app-region: no-drag;
+          -webkit-app-region: drag;
+          user-select: none;
         }
         .toolbar-brand {
           display: flex;
@@ -7295,6 +7273,7 @@ function Toolbar({ recording, onToggleRecording, onOpenSettings }) {
           display: flex;
           gap: var(--spacing-sm);
           flex-wrap: nowrap;
+          -webkit-app-region: no-drag;
         }
       ` })
   ] });

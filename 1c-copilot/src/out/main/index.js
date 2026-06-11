@@ -111,17 +111,34 @@ function baseOverlayOptions(preloadPath, size) {
     webPreferences: overlayWebPreferences(preloadPath)
   };
 }
+function setupDynamicMousePassthrough(win) {
+  win.on("mouseenter", () => {
+    win.setIgnoreMouseEvents(false);
+  });
+  win.on("mouseleave", () => {
+    win.setIgnoreMouseEvents(true, { forward: true });
+  });
+}
 function createOverlayWindow(kind, preloadPath, hash) {
   const defaults = OVERLAY_DEFAULTS[kind];
   const width = kind === "suggestion" ? getSetting("overlayWidth") : defaults.width;
   const size = { ...defaults, width };
-  const win = new electron.BrowserWindow(baseOverlayOptions(preloadPath, size));
+  const options = baseOverlayOptions(preloadPath, size);
+  if (kind === "toolbar") {
+    options.focusable = true;
+  }
+  const win = new electron.BrowserWindow(options);
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(`${process.env.ELECTRON_RENDERER_URL}#/${hash}`);
   } else {
     void win.loadFile(path.join(__dirname, "../renderer/index.html"), { hash: `/${hash}` });
   }
-  win.setIgnoreMouseEvents(false);
+  if (kind === "toolbar") {
+    win.setIgnoreMouseEvents(false);
+  } else {
+    win.setIgnoreMouseEvents(true, { forward: true });
+    setupDynamicMousePassthrough(win);
+  }
   win.setOpacity(getSetting("overlayOpacity"));
   win.once("ready-to-show", () => {
     win.showInactive();

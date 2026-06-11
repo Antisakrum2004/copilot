@@ -1,45 +1,27 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-
 type Props = {
   recording: boolean
   onToggleRecording: () => void
   onOpenSettings: () => void
 }
 
+/**
+ * Toolbar — панель управления 1C-Copilot.
+ *
+ * Использует нативный Electron drag через CSS:
+ *   - Весь тулбар: -webkit-app-region: drag  → перетаскивание окна
+ *   - Кнопки:      -webkit-app-region: no-drag → кликабельны
+ *
+ * Это заменило JS-based drag (mouseDown→moveWindow IPC),
+ * который конфликтовал с кликабельностью кнопок.
+ */
 export function Toolbar({ recording, onToggleRecording, onOpenSettings }: Props) {
-  const dragRef = useRef<{ x: number; y: number } | null>(null)
-
-  const onMouseDown = useCallback((e: React.MouseEvent) => {
-    if ((e.target as HTMLElement).closest('[data-no-drag]')) return
-    dragRef.current = { x: e.screenX, y: e.screenY }
-  }, [])
-
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      if (!dragRef.current) return
-      const dx = e.screenX - dragRef.current.x
-      const dy = e.screenY - dragRef.current.y
-      dragRef.current = { x: e.screenX, y: e.screenY }
-      void window.copilot.window.moveWindow(dx, dy)
-    }
-    const onUp = () => {
-      dragRef.current = null
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-  }, [])
-
   return (
-    <div className="toolbar glass-panel" onMouseDown={onMouseDown}>
+    <div className="toolbar glass-panel">
       <div className="toolbar-brand">
         <span className="toolbar-dot" />
         <span>1C Copilot</span>
       </div>
-      <div className="toolbar-actions" data-no-drag>
+      <div className="toolbar-actions">
         <button
           className={recording ? 'btn-primary' : 'btn-ghost'}
           onClick={onToggleRecording}
@@ -66,7 +48,8 @@ export function Toolbar({ recording, onToggleRecording, onOpenSettings }: Props)
           padding: var(--spacing-sm) var(--spacing-lg);
           width: 100%;
           height: 100%;
-          -webkit-app-region: no-drag;
+          -webkit-app-region: drag;
+          user-select: none;
         }
         .toolbar-brand {
           display: flex;
@@ -87,6 +70,7 @@ export function Toolbar({ recording, onToggleRecording, onOpenSettings }: Props)
           display: flex;
           gap: var(--spacing-sm);
           flex-wrap: nowrap;
+          -webkit-app-region: no-drag;
         }
       `}</style>
     </div>

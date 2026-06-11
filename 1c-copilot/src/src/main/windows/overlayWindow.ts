@@ -60,6 +60,23 @@ function baseOverlayOptions(
   }
 }
 
+/**
+ * Настраивает динамическое переключение мышиного passthrough:
+ * - Курсор входит в окно → окно становится кликабельным
+ * - Курсор покидает окно → окно снова прозрачно для кликов
+ *
+ * Это позволяет панелям не мешать работе в 1С, но даёт
+ * возможность взаимодействовать с ними при наведении.
+ */
+export function setupDynamicMousePassthrough(win: BrowserWindow): void {
+  win.on('mouseenter', () => {
+    win.setIgnoreMouseEvents(false)
+  })
+  win.on('mouseleave', () => {
+    win.setIgnoreMouseEvents(true, { forward: true })
+  })
+}
+
 export function createOverlayWindow(
   kind: OverlayWindowKind,
   preloadPath: string,
@@ -69,7 +86,17 @@ export function createOverlayWindow(
   const width = kind === 'suggestion' ? getSetting('overlayWidth') : defaults.width
   const size = { ...defaults, width }
 
-  const win = new BrowserWindow(baseOverlayOptions(preloadPath, size))
+  const options = baseOverlayOptions(preloadPath, size)
+
+  // ─── Тулбар — всегда кликабельный ───
+  // focusable: true позволяет окну получать фокус и корректно
+  // обрабатывать клики по кнопкам и нативный drag через
+  // -webkit-app-region: drag
+  if (kind === 'toolbar') {
+    options.focusable = true
+  }
+
+  const win = new BrowserWindow(options)
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(`${process.env.ELECTRON_RENDERER_URL}#/${hash}`)
@@ -77,7 +104,21 @@ export function createOverlayWindow(
     void win.loadFile(join(__dirname, '../renderer/index.html'), { hash: `/${hash}` })
   }
 
-  win.setIgnoreMouseEvents(false)
+  // ─── Настройка мышиного поведения по типу окна ───
+
+  if (kind === 'toolbar') {
+    // Тулбар ВСЕГДА кликабельный — мышь никогда не проходит сквозь.
+    // Пользователь должен иметь возможность нажимать кнопки
+    // и перетаскивать тулбар по экрану.
+    win.setIgnoreMouseEvents(false)
+  } else {
+    // suggestion / transcript — прозрачны для кликов по умолчанию,
+    // чтобы не мешать работать в 1С. Но при наведении курсора
+    // панели «оживают» и становятся интерактивными.
+    win.setIgnoreMouseEvents(true, { forward: true })
+    setupDynamicMousePassthrough(win)
+  }
+
   win.setOpacity(getSetting('overlayOpacity'))
 
   win.once('ready-to-show', () => {
