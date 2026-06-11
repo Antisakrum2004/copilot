@@ -81,9 +81,10 @@ function overlayWebPreferences(preloadPath) {
     backgroundThrottling: false
   };
 }
-function baseOverlayOptions(preloadPath, size) {
+function baseOverlayOptions(preloadPath, size, kind) {
   const display = electron.screen.getPrimaryDisplay();
   const { width: screenW } = display.workAreaSize;
+  const isToolbar = kind === "toolbar";
   return {
     width: size.width,
     height: size.height,
@@ -100,7 +101,7 @@ function baseOverlayOptions(preloadPath, size) {
     closable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
-    focusable: false,
+    focusable: isToolbar,
     frame: false,
     transparent: true,
     hasShadow: false,
@@ -111,38 +112,31 @@ function baseOverlayOptions(preloadPath, size) {
     webPreferences: overlayWebPreferences(preloadPath)
   };
 }
-function setupDynamicMousePassthrough(win) {
-  win.on("mouseenter", () => {
-    win.setIgnoreMouseEvents(false);
-  });
-  win.on("mouseleave", () => {
-    win.setIgnoreMouseEvents(true, { forward: true });
-  });
-}
 function createOverlayWindow(kind, preloadPath, hash) {
   const defaults = OVERLAY_DEFAULTS[kind];
   const width = kind === "suggestion" ? getSetting("overlayWidth") : defaults.width;
   const size = { ...defaults, width };
-  const options = baseOverlayOptions(preloadPath, size);
-  if (kind === "toolbar") {
-    options.focusable = true;
-  }
+  const options = baseOverlayOptions(preloadPath, size, kind);
   const win = new electron.BrowserWindow(options);
   if (process.env.ELECTRON_RENDERER_URL) {
     void win.loadURL(`${process.env.ELECTRON_RENDERER_URL}#/${hash}`);
   } else {
     void win.loadFile(path.join(__dirname, "../renderer/index.html"), { hash: `/${hash}` });
   }
+  win.setOpacity(getSetting("overlayOpacity"));
   if (kind === "toolbar") {
-    win.setIgnoreMouseEvents(false);
+    win.once("ready-to-show", () => {
+      win.show();
+      win.setIgnoreMouseEvents(false);
+      console.log("[overlayWindow] Toolbar показан и кликабелен");
+    });
   } else {
     win.setIgnoreMouseEvents(true, { forward: true });
-    setupDynamicMousePassthrough(win);
+    win.once("ready-to-show", () => {
+      win.showInactive();
+      console.log(`[overlayWindow] ${kind} показан (click-through по умолчанию)`);
+    });
   }
-  win.setOpacity(getSetting("overlayOpacity"));
-  win.once("ready-to-show", () => {
-    win.showInactive();
-  });
   return win;
 }
 function applyOverlayMousePassthrough(win, ignore, forward = true) {
@@ -172,7 +166,10 @@ function loadNativeLoopback() {
     console.warn("[audioCapture] WASAPI loopback доступен только на Windows");
     return;
   }
-  if (nativeLoopback) return;
+  if (nativeLoopback) {
+    console.log("[audioCapture] WASAPI loopback уже загружен");
+    return;
+  }
   try {
     const mod = require("win-audio-capture");
     nativeLoopback = {
@@ -185,9 +182,14 @@ function loadNativeLoopback() {
         mod.stopCapture();
       }
     };
-    console.log("[audioCapture] Нативный WASAPI loopback загружен");
+    console.log("[audioCapture] ✅ Нативный WASAPI loopback загружен успешно");
   } catch (err) {
-    console.warn("[audioCapture] win-audio-capture не найден, используем fallback:", err.message);
+    const error = err;
+    console.error("[audioCapture] ❌ КРИТИЧЕСКАЯ ОШИБКА НАТИВНОГО АУДИО:");
+    console.error("[audioCapture]    message:", error.message);
+    console.error("[audioCapture]    name:", error.name);
+    console.error("[audioCapture]    stack:", error.stack?.split("\n").slice(0, 3).join("\n"));
+    console.warn("[audioCapture] → Переключаемся на ffmpeg fallback");
     nativeLoopback = null;
   }
 }
@@ -344,29 +346,58 @@ function startFallbackCapture(source, chunkBuf) {
       "-"
     ];
   }
+  console.log(`[audioCapture] Запуск ffmpeg (${source}): ffmpeg ${ffmpegArgs.join(" ")}`);
   try {
-    const ffmpeg = spawn("ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "ignore"] });
+    const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
     if (source === "system") {
       ffmpegSystemProcess = ffmpeg;
     } else {
       ffmpegMicProcess = ffmpeg;
     }
+    let stderrBuffer = "";
+    ffmpeg.stderr?.on("data", (data) => {
+      const text = data.toString();
+      stderrBuffer += text;
+      const lines = text.trim().split("\n");
+      for (const line of lines) {
+        if (line.includes("[error]") || line.includes("[warning]") || line.includes("Error") || line.includes("error") || line.includes("Cannot") || line.includes("No such")) {
+          console.error(`[audioCapture] ffmpeg stderr (${source}): ${line}`);
+        }
+      }
+    });
     let startupConfirmed = false;
+    let firstDataReceived = false;
     const startupTimer = setTimeout(() => {
       if (!startupConfirmed) {
         startupConfirmed = true;
-        console.log(`[audioCapture] ffmpeg (${source}) стартовал успешно (grace period)`);
+        if (firstDataReceived) {
+          console.log(`[audioCapture] ✅ ffmpeg (${source}) стартовал успешно — данные поступают`);
+        } else {
+          console.warn(`[audioCapture] ⚠️ ffmpeg (${source}) работает, но данные НЕ поступают.`);
+          console.warn(`[audioCapture]    Возможные причины:`);
+          console.warn(`[audioCapture]    - ffmpeg не найден в PATH`);
+          console.warn(`[audioCapture]    - Аудио-устройство не найдено / захардкоженное имя`);
+          console.warn(`[audioCapture]    - Устройство занято другим приложением`);
+          if (stderrBuffer.length > 0) {
+            console.warn(`[audioCapture]    Последний stderr:
+${stderrBuffer.slice(-500)}`);
+          }
+        }
       }
-    }, 2e3);
+    }, 3e3);
     ffmpeg.stdout?.on("data", (data) => {
       if (!startupConfirmed) {
         startupConfirmed = true;
+        firstDataReceived = true;
         clearTimeout(startupTimer);
+        console.log(`[audioCapture] ✅ ffmpeg (${source}) — первые аудио-данные получены (${data.length} байт)`);
       }
       chunkBuf.push(data);
     });
     ffmpeg.on("error", (err) => {
-      console.error(`[audioCapture] ffmpeg error (${source}):`, err.message);
+      console.error(`[audioCapture] ❌ ffmpeg error (${source}):`, err.message);
       clearTimeout(startupTimer);
       if (source === "system") {
         ffmpegSystemProcess = null;
@@ -374,8 +405,12 @@ function startFallbackCapture(source, chunkBuf) {
         ffmpegMicProcess = null;
       }
     });
-    ffmpeg.on("close", (code) => {
-      console.log(`[audioCapture] ffmpeg exited (${source}) with code ${code}`);
+    ffmpeg.on("close", (code, signal) => {
+      console.log(`[audioCapture] ffmpeg exited (${source}) with code=${code} signal=${signal}`);
+      if (code !== 0 && stderrBuffer.length > 0) {
+        console.error(`[audioCapture] ffmpeg stderr (последние 500 символов):
+${stderrBuffer.slice(-500)}`);
+      }
       clearTimeout(startupTimer);
       if (source === "system") {
         ffmpegSystemProcess = null;
@@ -385,7 +420,8 @@ function startFallbackCapture(source, chunkBuf) {
     });
     return true;
   } catch (err) {
-    console.error(`[audioCapture] Не удалось запустить ffmpeg (${source}):`, err.message);
+    console.error(`[audioCapture] ❌ Не удалось запустить ffmpeg (${source}):`, err.message);
+    console.error(`[audioCapture]    Убедитесь что ffmpeg установлен и доступен в PATH`);
     return false;
   }
 }
@@ -415,10 +451,12 @@ function startNativeLoopbackCapture() {
   nativeLoopback.start((buffer) => {
     systemChunkBuf?.push(buffer);
   });
+  console.log("[audioCapture] ✅ WASAPI loopback захват запущен");
 }
 function stopNativeLoopbackCapture() {
   if (nativeLoopback) {
     nativeLoopback.stop();
+    console.log("[audioCapture] WASAPI loopback захват остановлен");
   }
   systemChunkBuf?.flush();
   systemChunkBuf = null;
@@ -431,18 +469,20 @@ function startCapture(source) {
     console.warn(`[audioCapture] ${source} уже захватывается`);
     return true;
   }
+  console.log(`[audioCapture] Запуск захвата: ${source}`);
   if (source === "system") {
     loadNativeLoopback();
     if (process.platform === "win32" && nativeLoopback) {
       startNativeLoopbackCapture();
       captureState.system = true;
-      console.log("[audioCapture] Системный звук: WASAPI loopback запущен");
+      console.log("[audioCapture] ✅ Системный звук: WASAPI loopback запущен");
       return true;
     }
+    console.log("[audioCapture] WASAPI недоступен, пробуем ffmpeg fallback для системного звука");
     systemChunkBuf = new ChunkBuffer("system", SAMPLE_RATE, CHANNELS);
     const ffmpegOk = startFallbackCapture("system", systemChunkBuf);
     if (!ffmpegOk) {
-      console.error("[audioCapture] Системный звук: ffmpeg fallback не запустился");
+      console.error("[audioCapture] ❌ Системный звук: ffmpeg fallback не запустился");
       return false;
     }
     captureState.system = true;
@@ -452,15 +492,16 @@ function startCapture(source) {
   micChunkBuf = new ChunkBuffer("mic", SAMPLE_RATE, CHANNELS);
   const micOk = startFallbackCapture("mic", micChunkBuf);
   if (!micOk) {
-    console.error("[audioCapture] Микрофон: ffmpeg не запустился");
+    console.error("[audioCapture] ❌ Микрофон: ffmpeg не запустился");
     return false;
   }
   captureState.mic = true;
-  console.log("[audioCapture] Микрофон: захват запущен");
+  console.log("[audioCapture] ✅ Микрофон: захват запущен");
   return true;
 }
 function stopCapture(source) {
   if (!captureState[source]) return;
+  console.log(`[audioCapture] Остановка захвата: ${source}`);
   if (source === "system") {
     stopNativeLoopbackCapture();
     killFfmpegProcess(ffmpegSystemProcess, "system");
@@ -856,7 +897,12 @@ function registerIpcHandlers() {
     IPC.window.setIgnoreMouseEvents,
     (event, ignore, options) => {
       const win = electron.BrowserWindow.fromWebContents(event.sender);
-      if (win) applyOverlayMousePassthrough(win, ignore, options?.forward ?? true);
+      if (!win) return;
+      if (ignore && win === toolbarWindow) {
+        console.warn("[handlers] Попытка включить ignoreMouseEvents для toolbar — ЗАБЛОКИРОВАНО");
+        return;
+      }
+      applyOverlayMousePassthrough(win, ignore, options?.forward ?? true);
     }
   );
   electron.ipcMain.handle(IPC.window.setTransparent, (event, opacity) => {

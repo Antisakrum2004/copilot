@@ -7145,6 +7145,23 @@ function SuggestionPanel() {
     "Подсказки 1С появятся здесь.\n\nНажмите «Слушать» на тулбаре — аудио будет захватываться, транскрибироваться и автоматически отправляться на анализ.\n\nИли нажмите «Спросить ИИ» для ручного запроса."
   );
   const [streaming, setStreaming] = reactExports.useState(false);
+  const rootRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    const el2 = rootRef.current;
+    if (!el2) return;
+    const onMouseEnter = () => {
+      void window.copilot.window.setIgnoreMouseEvents(false);
+    };
+    const onMouseLeave = () => {
+      void window.copilot.window.setIgnoreMouseEvents(true, { forward: true });
+    };
+    el2.addEventListener("mouseenter", onMouseEnter);
+    el2.addEventListener("mouseleave", onMouseLeave);
+    return () => {
+      el2.removeEventListener("mouseenter", onMouseEnter);
+      el2.removeEventListener("mouseleave", onMouseLeave);
+    };
+  }, []);
   reactExports.useEffect(() => {
     return window.copilot.suggestion.onContentUpdate((payload) => {
       setContent(payload.content);
@@ -7158,7 +7175,7 @@ function SuggestionPanel() {
     await window.copilot.suggestion.abort();
     setStreaming(false);
   };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "suggestion glass-panel", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: rootRef, className: "suggestion glass-panel", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "suggestion-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "suggestion-title", children: "Подсказки 1С" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "suggestion-actions", children: [
@@ -7281,6 +7298,23 @@ function Toolbar({ recording, onToggleRecording, onOpenSettings }) {
 let lineId = 0;
 function TranscriptPanel() {
   const [lines, setLines] = reactExports.useState([]);
+  const rootRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    const el2 = rootRef.current;
+    if (!el2) return;
+    const onMouseEnter = () => {
+      void window.copilot.window.setIgnoreMouseEvents(false);
+    };
+    const onMouseLeave = () => {
+      void window.copilot.window.setIgnoreMouseEvents(true, { forward: true });
+    };
+    el2.addEventListener("mouseenter", onMouseEnter);
+    el2.addEventListener("mouseleave", onMouseLeave);
+    return () => {
+      el2.removeEventListener("mouseenter", onMouseEnter);
+      el2.removeEventListener("mouseleave", onMouseLeave);
+    };
+  }, []);
   reactExports.useEffect(() => {
     const offUpdate = window.copilot.transcription.onUpdate((payload) => {
       setLines((prev) => [...prev.slice(-200), { ...payload, id: ++lineId }]);
@@ -7291,7 +7325,7 @@ function TranscriptPanel() {
       offClear();
     };
   }, []);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transcript glass-panel", children: [
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { ref: rootRef, className: "transcript glass-panel", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("header", { className: "transcript-header", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Расшифровка" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn-ghost", onClick: () => window.copilot.transcription.clear(), children: "Очистить" })
@@ -7353,9 +7387,6 @@ function App() {
   const [route] = reactExports.useState(getRouteFromHash);
   const [recording, setRecording] = reactExports.useState(false);
   const [settingsOpen, setSettingsOpen] = reactExports.useState(false);
-  reactExports.useEffect(() => {
-    void window.copilot.window.setIgnoreMouseEvents(false);
-  }, []);
   const toggleRecording = reactExports.useCallback(async () => {
     if (recording) {
       await window.copilot.audio.stopStreams();
