@@ -139,7 +139,18 @@ export function registerIpcHandlers(): void {
     IPC.window.setIgnoreMouseEvents,
     (event, ignore: boolean, options?: { forward?: boolean }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
-      if (win) applyOverlayMousePassthrough(win, ignore, options?.forward ?? true)
+      if (!win) return
+
+      // ─── ЗАЩИТА ТУЛБАРА ───
+      // Тулбар ВСЕГДА должен быть кликабельным.
+      // Запрещаем setIgnoreMouseEvents(true) для тулбара,
+      // иначе пользователь не сможет нажимать кнопки.
+      if (ignore && win === toolbarWindow) {
+        console.warn('[handlers] Попытка включить ignoreMouseEvents для toolbar — ЗАБЛОКИРОВАНО')
+        return
+      }
+
+      applyOverlayMousePassthrough(win, ignore, options?.forward ?? true)
     }
   )
 

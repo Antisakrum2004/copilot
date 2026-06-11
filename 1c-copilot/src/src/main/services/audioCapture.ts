@@ -64,7 +64,10 @@ function loadNativeLoopback(): void {
     return
   }
   // Если уже загружен — не повторяем
-  if (nativeLoopback) return
+  if (nativeLoopback) {
+    console.log('[audioCapture] WASAPI loopback уже загружен')
+    return
+  }
 
   try {
     // Пытаемся загрузить win-audio-capture (нативный модуль)
@@ -80,9 +83,14 @@ function loadNativeLoopback(): void {
         mod.stopCapture()
       }
     }
-    console.log('[audioCapture] Нативный WASAPI loopback загружен')
+    console.log('[audioCapture] ✅ Нативный WASAPI loopback загружен успешно')
   } catch (err) {
-    console.warn('[audioCapture] win-audio-capture не найден, используем fallback:', (err as Error).message)
+    const error = err as Error
+    console.error('[audioCapture] ❌ КРИТИЧЕСКАЯ ОШИБКА НАТИВНОГО АУДИО:')
+    console.error('[audioCapture]    message:', error.message)
+    console.error('[audioCapture]    name:', error.name)
+    console.error('[audioCapture]    stack:', error.stack?.split('\n').slice(0, 3).join('\n'))
+    console.warn('[audioCapture] → Переключаемся на ffmpeg fallback')
     nativeLoopback = null
   }
 }
@@ -286,8 +294,14 @@ function startFallbackCapture(
     ]
   }
 
+  console.log(`[audioCapture] Запуск ffmpeg (${source}): ffmpeg ${ffmpegArgs.join(' ')}`)
+
   try {
-    const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'ignore'] })
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: stderr = 'pipe' вместо 'ignore'!
+    // Без этого мы не видим ошибки ffmpeg (нет устройства, ffmpeg не установлен и т.д.)
+    const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
 
     // Сохраняем ссылку на процесс на уровне модуля
     if (source === 'system') {
@@ -296,27 +310,59 @@ function startFallbackCapture(
       ffmpegMicProcess = ffmpeg
     }
 
+    // ─── Логирование stderr ffmpeg ───
+    // ffmpeg выводит всю диагностику в stderr (не stdout!)
+    let stderrBuffer = ''
+    ffmpeg.stderr?.on('data', (data: Buffer) => {
+      const text = data.toString()
+      stderrBuffer += text
+      // Выводим каждую строку stderr в консоль для диагностики
+      const lines = text.trim().split('\n')
+      for (const line of lines) {
+        // Фильтруем шум — выводим только ошибки и предупреждения
+        if (line.includes('[error]') || line.includes('[warning]') ||
+            line.includes('Error') || line.includes('error') ||
+            line.includes('Cannot') || line.includes('No such')) {
+          console.error(`[audioCapture] ffmpeg stderr (${source}): ${line}`)
+        }
+      }
+    })
+
     // Флаг успешного старта: ffmpeg считается запущенным,
-    // если не упал в первые 2 секунды или если пришли первые данные
+    // если не упал в первые 3 секунды или если пришли первые данные
     let startupConfirmed = false
+    let firstDataReceived = false
     const startupTimer = setTimeout(() => {
       if (!startupConfirmed) {
         startupConfirmed = true
-        console.log(`[audioCapture] ffmpeg (${source}) стартовал успешно (grace period)`)
+        if (firstDataReceived) {
+          console.log(`[audioCapture] ✅ ffmpeg (${source}) стартовал успешно — данные поступают`)
+        } else {
+          console.warn(`[audioCapture] ⚠️ ffmpeg (${source}) работает, но данные НЕ поступают.`)
+          console.warn(`[audioCapture]    Возможные причины:`)
+          console.warn(`[audioCapture]    - ffmpeg не найден в PATH`)
+          console.warn(`[audioCapture]    - Аудио-устройство не найдено / захардкоженное имя`)
+          console.warn(`[audioCapture]    - Устройство занято другим приложением`)
+          if (stderrBuffer.length > 0) {
+            console.warn(`[audioCapture]    Последний stderr:\n${stderrBuffer.slice(-500)}`)
+          }
+        }
       }
-    }, 2000)
+    }, 3000)
 
     ffmpeg.stdout?.on('data', (data: Buffer) => {
       // Первые данные = процесс работает, подтверждаем старт
       if (!startupConfirmed) {
         startupConfirmed = true
+        firstDataReceived = true
         clearTimeout(startupTimer)
+        console.log(`[audioCapture] ✅ ffmpeg (${source}) — первые аудио-данные получены (${data.length} байт)`)
       }
       chunkBuf.push(data)
     })
 
     ffmpeg.on('error', (err: Error) => {
-      console.error(`[audioCapture] ffmpeg error (${source}):`, err.message)
+      console.error(`[audioCapture] ❌ ffmpeg error (${source}):`, err.message)
       clearTimeout(startupTimer)
       // Очищаем ссылку на упавший процесс
       if (source === 'system') {
@@ -326,8 +372,11 @@ function startFallbackCapture(
       }
     })
 
-    ffmpeg.on('close', (code: number) => {
-      console.log(`[audioCapture] ffmpeg exited (${source}) with code ${code}`)
+    ffmpeg.on('close', (code: number | null, signal: string | null) => {
+      console.log(`[audioCapture] ffmpeg exited (${source}) with code=${code} signal=${signal}`)
+      if (code !== 0 && stderrBuffer.length > 0) {
+        console.error(`[audioCapture] ffmpeg stderr (последние 500 символов):\n${stderrBuffer.slice(-500)}`)
+      }
       clearTimeout(startupTimer)
       // Очищаем ссылку на завершённый процесс
       if (source === 'system') {
@@ -339,7 +388,8 @@ function startFallbackCapture(
 
     return true
   } catch (err) {
-    console.error(`[audioCapture] Не удалось запустить ffmpeg (${source}):`, (err as Error).message)
+    console.error(`[audioCapture] ❌ Не удалось запустить ffmpeg (${source}):`, (err as Error).message)
+    console.error(`[audioCapture]    Убедитесь что ffmpeg установлен и доступен в PATH`)
     return false
   }
 }
@@ -381,11 +431,13 @@ function startNativeLoopbackCapture(): void {
   nativeLoopback.start((buffer: Buffer) => {
     systemChunkBuf?.push(buffer)
   })
+  console.log('[audioCapture] ✅ WASAPI loopback захват запущен')
 }
 
 function stopNativeLoopbackCapture(): void {
   if (nativeLoopback) {
     nativeLoopback.stop()
+    console.log('[audioCapture] WASAPI loopback захват остановлен')
   }
   systemChunkBuf?.flush()
   systemChunkBuf = null
@@ -403,25 +455,25 @@ export function startCapture(source: AudioSource): boolean {
     return true
   }
 
+  console.log(`[audioCapture] Запуск захвата: ${source}`)
+
   if (source === 'system') {
-    // ─── ИСПРАВЛЕНО (WASAPI Dead Code): Загружаем нативный модуль
-    // ДО проверки nativeLoopback. Раньше loadNativeLoopback()
-    // никогда не вызывался перед ветвлением, и nativeLoopback
-    // всегда был null → WASAPI путь был мёртвым кодом.
+    // Загружаем нативный модуль ДО проверки nativeLoopback
     loadNativeLoopback()
 
     if (process.platform === 'win32' && nativeLoopback) {
       startNativeLoopbackCapture()
       captureState.system = true
-      console.log('[audioCapture] Системный звук: WASAPI loopback запущен')
+      console.log('[audioCapture] ✅ Системный звук: WASAPI loopback запущен')
       return true
     }
 
     // Fallback через ffmpeg
+    console.log('[audioCapture] WASAPI недоступен, пробуем ffmpeg fallback для системного звука')
     systemChunkBuf = new ChunkBuffer('system', SAMPLE_RATE, CHANNELS)
     const ffmpegOk = startFallbackCapture('system', systemChunkBuf)
     if (!ffmpegOk) {
-      console.error('[audioCapture] Системный звук: ffmpeg fallback не запустился')
+      console.error('[audioCapture] ❌ Системный звук: ffmpeg fallback не запустился')
       return false
     }
     captureState.system = true
@@ -433,20 +485,21 @@ export function startCapture(source: AudioSource): boolean {
   micChunkBuf = new ChunkBuffer('mic', SAMPLE_RATE, CHANNELS)
   const micOk = startFallbackCapture('mic', micChunkBuf)
   if (!micOk) {
-    console.error('[audioCapture] Микрофон: ffmpeg не запустился')
+    console.error('[audioCapture] ❌ Микрофон: ffmpeg не запустился')
     return false
   }
   captureState.mic = true
-  console.log('[audioCapture] Микрофон: захват запущен')
+  console.log('[audioCapture] ✅ Микрофон: захват запущен')
   return true
 }
 
 export function stopCapture(source: AudioSource): void {
   if (!captureState[source]) return
 
+  console.log(`[audioCapture] Остановка захвата: ${source}`)
+
   if (source === 'system') {
     stopNativeLoopbackCapture()
-    // ─── ИСПРАВЛЕНО (Zombie): Убиваем ffmpeg-процесс системного звука
     killFfmpegProcess(ffmpegSystemProcess, 'system')
     ffmpegSystemProcess = null
     systemChunkBuf?.flush()
@@ -454,7 +507,6 @@ export function stopCapture(source: AudioSource): void {
     captureState.system = false
     console.log('[audioCapture] Системный звук: остановлен')
   } else {
-    // ─── ИСПРАВЛЕНО (Zombie): Убиваем ffmpeg-процесс микрофона
     killFfmpegProcess(ffmpegMicProcess, 'mic')
     ffmpegMicProcess = null
     micChunkBuf?.flush()

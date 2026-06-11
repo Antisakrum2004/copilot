@@ -1,6 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SuggestionUpdatePayload } from '@shared/ipc'
 
+/**
+ * SuggestionPanel — панель подсказок 1C-Copilot.
+ *
+ * Использует DOM-based dynamic mouse passthrough:
+ *   - По умолчанию: setIgnoreMouseEvents(true, {forward:true}) — клики проходят сквозь
+ *   - Курсор наведён (DOM mouseenter): setIgnoreMouseEvents(false) — панель интерактивна
+ *   - Курсор ушёл (DOM mouseleave): setIgnoreMouseEvents(true, {forward:true}) — снова click-through
+ *
+ * BrowserWindow-события mouseenter/mouseleave НЕ работают на Windows
+ * при setIgnoreMouseEvents(true), поэтому переключение делается
+ * через DOM-события в renderer-процессе + IPC.
+ */
 export function SuggestionPanel() {
   const [content, setContent] = useState(
     'Подсказки 1С появятся здесь.\n\n' +
@@ -9,7 +21,30 @@ export function SuggestionPanel() {
       'Или нажмите «Спросить ИИ» для ручного запроса.'
   )
   const [streaming, setStreaming] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
 
+  // ─── DOM-based dynamic passthrough ───
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+
+    const onMouseEnter = () => {
+      void window.copilot.window.setIgnoreMouseEvents(false)
+    }
+    const onMouseLeave = () => {
+      void window.copilot.window.setIgnoreMouseEvents(true, { forward: true })
+    }
+
+    el.addEventListener('mouseenter', onMouseEnter)
+    el.addEventListener('mouseleave', onMouseLeave)
+
+    return () => {
+      el.removeEventListener('mouseenter', onMouseEnter)
+      el.removeEventListener('mouseleave', onMouseLeave)
+    }
+  }, [])
+
+  // ─── Подписка на контент подсказок ───
   useEffect(() => {
     return window.copilot.suggestion.onContentUpdate((payload: SuggestionUpdatePayload) => {
       setContent(payload.content)
@@ -27,7 +62,7 @@ export function SuggestionPanel() {
   }
 
   return (
-    <div className="suggestion glass-panel">
+    <div ref={rootRef} className="suggestion glass-panel">
       <header className="suggestion-header">
         <span className="suggestion-title">Подсказки 1С</span>
         <div className="suggestion-actions">

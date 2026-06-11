@@ -1,13 +1,44 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TranscriptionUpdatePayload } from '@shared/ipc'
 
 type Line = TranscriptionUpdatePayload & { id: number }
 
 let lineId = 0
 
+/**
+ * TranscriptPanel — панель расшифровки речи.
+ *
+ * Использует DOM-based dynamic mouse passthrough:
+ *   - По умолчанию: setIgnoreMouseEvents(true, {forward:true}) — клики проходят сквозь
+ *   - Курсор наведён (DOM mouseenter): setIgnoreMouseEvents(false) — панель интерактивна
+ *   - Курсор ушёл (DOM mouseleave): setIgnoreMouseEvents(true, {forward:true}) — снова click-through
+ */
 export function TranscriptPanel() {
   const [lines, setLines] = useState<Line[]>([])
+  const rootRef = useRef<HTMLDivElement>(null)
 
+  // ─── DOM-based dynamic passthrough ───
+  useEffect(() => {
+    const el = rootRef.current
+    if (!el) return
+
+    const onMouseEnter = () => {
+      void window.copilot.window.setIgnoreMouseEvents(false)
+    }
+    const onMouseLeave = () => {
+      void window.copilot.window.setIgnoreMouseEvents(true, { forward: true })
+    }
+
+    el.addEventListener('mouseenter', onMouseEnter)
+    el.addEventListener('mouseleave', onMouseLeave)
+
+    return () => {
+      el.removeEventListener('mouseenter', onMouseEnter)
+      el.removeEventListener('mouseleave', onMouseLeave)
+    }
+  }, [])
+
+  // ─── Подписка на транскрипцию ───
   useEffect(() => {
     const offUpdate = window.copilot.transcription.onUpdate((payload) => {
       setLines((prev) => [...prev.slice(-200), { ...payload, id: ++lineId }])
@@ -20,7 +51,7 @@ export function TranscriptPanel() {
   }, [])
 
   return (
-    <div className="transcript glass-panel">
+    <div ref={rootRef} className="transcript glass-panel">
       <header className="transcript-header">
         <span>Расшифровка</span>
         <button className="btn-ghost" onClick={() => window.copilot.transcription.clear()}>

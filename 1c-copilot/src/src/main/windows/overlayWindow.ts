@@ -27,10 +27,15 @@ function overlayWebPreferences(preloadPath: string): Electron.WebPreferences {
 /** Base BrowserWindow options from ShadowHint overlay analysis. */
 function baseOverlayOptions(
   preloadPath: string,
-  size: { width: number; height: number; minWidth: number; minHeight: number }
+  size: { width: number; height: number; minWidth: number; minHeight: number },
+  kind: OverlayWindowKind
 ): Electron.BrowserWindowConstructorOptions {
   const display = screen.getPrimaryDisplay()
   const { width: screenW } = display.workAreaSize
+
+  // Тулбар ДОЛЖЕН быть focusable на Windows — иначе
+  // -webkit-app-region: drag и клики по кнопкам не работают
+  const isToolbar = kind === 'toolbar'
 
   return {
     width: size.width,
@@ -48,7 +53,7 @@ function baseOverlayOptions(
     closable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
-    focusable: false,
+    focusable: isToolbar,
     frame: false,
     transparent: true,
     hasShadow: false,
@@ -60,23 +65,6 @@ function baseOverlayOptions(
   }
 }
 
-/**
- * Настраивает динамическое переключение мышиного passthrough:
- * - Курсор входит в окно → окно становится кликабельным
- * - Курсор покидает окно → окно снова прозрачно для кликов
- *
- * Это позволяет панелям не мешать работе в 1С, но даёт
- * возможность взаимодействовать с ними при наведении.
- */
-export function setupDynamicMousePassthrough(win: BrowserWindow): void {
-  win.on('mouseenter', () => {
-    win.setIgnoreMouseEvents(false)
-  })
-  win.on('mouseleave', () => {
-    win.setIgnoreMouseEvents(true, { forward: true })
-  })
-}
-
 export function createOverlayWindow(
   kind: OverlayWindowKind,
   preloadPath: string,
@@ -86,16 +74,7 @@ export function createOverlayWindow(
   const width = kind === 'suggestion' ? getSetting('overlayWidth') : defaults.width
   const size = { ...defaults, width }
 
-  const options = baseOverlayOptions(preloadPath, size)
-
-  // ─── Тулбар — всегда кликабельный ───
-  // focusable: true позволяет окну получать фокус и корректно
-  // обрабатывать клики по кнопкам и нативный drag через
-  // -webkit-app-region: drag
-  if (kind === 'toolbar') {
-    options.focusable = true
-  }
-
+  const options = baseOverlayOptions(preloadPath, size, kind)
   const win = new BrowserWindow(options)
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -104,26 +83,39 @@ export function createOverlayWindow(
     void win.loadFile(join(__dirname, '../renderer/index.html'), { hash: `/${hash}` })
   }
 
+  win.setOpacity(getSetting('overlayOpacity'))
+
   // ─── Настройка мышиного поведения по типу окна ───
 
   if (kind === 'toolbar') {
     // Тулбар ВСЕГДА кликабельный — мышь никогда не проходит сквозь.
-    // Пользователь должен иметь возможность нажимать кнопки
-    // и перетаскивать тулбар по экрану.
-    win.setIgnoreMouseEvents(false)
+    //
+    // КРИТИЧЕСКИЙ ПОРЯДОК НА WINDOWS:
+    //   1. show() — активирует окно (НЕ showInactive!)
+    //   2. setIgnoreMouseEvents(false) — ПОСЛЕ show()
+    //
+    // showInactive() НЕ активирует окно, и на Windows это ломает
+    // -webkit-app-region: drag и клики по кнопкам.
+    win.once('ready-to-show', () => {
+      win.show()
+      win.setIgnoreMouseEvents(false)
+      console.log('[overlayWindow] Toolbar показан и кликабелен')
+    })
   } else {
     // suggestion / transcript — прозрачны для кликов по умолчанию,
-    // чтобы не мешать работать в 1С. Но при наведении курсора
-    // панели «оживают» и становятся интерактивными.
+    // чтобы не мешать работать в 1С.
+    //
+    // ВАЖНО: BrowserWindow-события mouseenter/mouseleave НЕ работают
+    // на Windows при setIgnoreMouseEvents(true). Поэтому динамическое
+    // переключение делается через DOM-события в renderer-процессе
+    // (см. SuggestionPanel.tsx, TranscriptPanel.tsx).
     win.setIgnoreMouseEvents(true, { forward: true })
-    setupDynamicMousePassthrough(win)
+
+    win.once('ready-to-show', () => {
+      win.showInactive()
+      console.log(`[overlayWindow] ${kind} показан (click-through по умолчанию)`)
+    })
   }
-
-  win.setOpacity(getSetting('overlayOpacity'))
-
-  win.once('ready-to-show', () => {
-    win.showInactive()
-  })
 
   return win
 }

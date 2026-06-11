@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { SettingsPanel } from './components/SettingsPanel'
 import { SuggestionPanel } from './components/SuggestionPanel'
 import { Toolbar } from './components/Toolbar'
@@ -17,10 +17,11 @@ export default function App() {
   const [recording, setRecording] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
-  useEffect(() => {
-    // Transparent windows: clicks pass through empty areas when enabled per-panel
-    void window.copilot.window.setIgnoreMouseEvents(false)
-  }, [])
+  // ВАЖНО: НЕ вызываем setIgnoreMouseEvents здесь!
+  // Каждое окно управляет своим mouse-поведением:
+  //   - toolbar: всегда кликабельный (настраивается в main процессе)
+  //   - suggestion/transcript: dynamic passthrough через DOM-события
+  //     в самих компонентах (mouseenter → clickable, mouseleave → click-through)
 
   const toggleRecording = useCallback(async () => {
     if (recording) {
