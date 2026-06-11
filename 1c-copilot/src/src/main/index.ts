@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
-import { createMainWindows, registerIpcHandlers } from './ipc/handlers'
+import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 
 const gotLock = app.requestSingleInstanceLock()
 
@@ -13,6 +13,13 @@ if (!gotLock) {
       if (win.isMinimized()) win.restore()
       win.showInactive()
     }
+  })
+
+  // ─── ИСПРАВЛЕНО: Глобальная очистка при выходе приложения ───
+  // Останавливает все аудио-стримы и убивает ffmpeg-процессы
+  // перед завершением, предотвращая зомби-процессы.
+  app.on('before-quit', () => {
+    cleanup()
   })
 
   app.whenReady().then(() => {

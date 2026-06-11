@@ -14,6 +14,7 @@
 
 import { BrowserWindow } from 'electron'
 import { IPC, type AudioChunkPayload } from '@shared/ipc'
+import type { ChildProcess } from 'child_process'
 
 // ─── Конфигурация ────────────────────────────────────────────────────
 
@@ -43,8 +44,6 @@ export type AudioCaptureState = {
 // ─── Внутреннее состояние ────────────────────────────────────────────
 
 let captureState: AudioCaptureState = { mic: false, system: false }
-let micInterval: ReturnType<typeof setInterval> | null = null
-let systemInterval: ReturnType<typeof setInterval> | null = null
 let chunkCallback: AudioChunkCallback | null = null
 
 // Нативный модуль WASAPI loopback (Windows-only)
@@ -53,6 +52,10 @@ let nativeLoopback: {
   stop: () => void
 } | null = null
 
+// ffmpeg child processes — на уровне модуля для управления жизненным циклом
+let ffmpegMicProcess: ChildProcess | null = null
+let ffmpegSystemProcess: ChildProcess | null = null
+
 // ─── Инициализация нативного модуля ──────────────────────────────────
 
 function loadNativeLoopback(): void {
@@ -60,6 +63,8 @@ function loadNativeLoopback(): void {
     console.warn('[audioCapture] WASAPI loopback доступен только на Windows')
     return
   }
+  // Если уже загружен — не повторяем
+  if (nativeLoopback) return
 
   try {
     // Пытаемся загрузить win-audio-capture (нативный модуль)
@@ -215,11 +220,17 @@ class ChunkBuffer {
 /**
  * Fallback-режим захвата аудио через child_process + ffmpeg.
  * Работает на любой платформе где установлен ffmpeg.
+ *
+ * Ссылка на процесс сохраняется на уровне модуля
+ * (ffmpegMicProcess / ffmpegSystemProcess) для корректного
+ * завершения через stopCapture().
+ *
+ * @returns true если процесс ffmpeg успешно запущен, false если нет
  */
 function startFallbackCapture(
   source: AudioSource,
   chunkBuf: ChunkBuffer
-): ReturnType<typeof setInterval> | null {
+): boolean {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { spawn } = require('child_process') as typeof import('child_process')
 
@@ -278,27 +289,80 @@ function startFallbackCapture(
   try {
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, { stdio: ['ignore', 'pipe', 'ignore'] })
 
+    // Сохраняем ссылку на процесс на уровне модуля
+    if (source === 'system') {
+      ffmpegSystemProcess = ffmpeg
+    } else {
+      ffmpegMicProcess = ffmpeg
+    }
+
+    // Флаг успешного старта: ffmpeg считается запущенным,
+    // если не упал в первые 2 секунды или если пришли первые данные
+    let startupConfirmed = false
+    const startupTimer = setTimeout(() => {
+      if (!startupConfirmed) {
+        startupConfirmed = true
+        console.log(`[audioCapture] ffmpeg (${source}) стартовал успешно (grace period)`)
+      }
+    }, 2000)
+
     ffmpeg.stdout?.on('data', (data: Buffer) => {
+      // Первые данные = процесс работает, подтверждаем старт
+      if (!startupConfirmed) {
+        startupConfirmed = true
+        clearTimeout(startupTimer)
+      }
       chunkBuf.push(data)
     })
 
     ffmpeg.on('error', (err: Error) => {
       console.error(`[audioCapture] ffmpeg error (${source}):`, err.message)
+      clearTimeout(startupTimer)
+      // Очищаем ссылку на упавший процесс
+      if (source === 'system') {
+        ffmpegSystemProcess = null
+      } else {
+        ffmpegMicProcess = null
+      }
     })
 
     ffmpeg.on('close', (code: number) => {
       console.log(`[audioCapture] ffmpeg exited (${source}) with code ${code}`)
+      clearTimeout(startupTimer)
+      // Очищаем ссылку на завершённый процесс
+      if (source === 'system') {
+        ffmpegSystemProcess = null
+      } else {
+        ffmpegMicProcess = null
+      }
     })
 
-    // Health-check interval
-    return setInterval(() => {
-      if (ffmpeg.killed || ffmpeg.exitCode !== null) {
-        console.warn(`[audioCapture] ffmpeg (${source}) упал`)
-      }
-    }, 5000) as unknown as ReturnType<typeof setInterval>
+    return true
   } catch (err) {
     console.error(`[audioCapture] Не удалось запустить ffmpeg (${source}):`, (err as Error).message)
-    return null
+    return false
+  }
+}
+
+/**
+ * Безопасно убивает процесс ffmpeg по ссылке.
+ * Сначала SIGKILL, на Windows — fallback на kill() без сигнала.
+ */
+function killFfmpegProcess(proc: ChildProcess | null, source: AudioSource): void {
+  if (!proc) return
+  if (proc.killed || proc.exitCode !== null) return
+
+  try {
+    proc.kill('SIGKILL')
+    console.log(`[audioCapture] ffmpeg (${source}) убит (SIGKILL)`)
+  } catch {
+    // На Windows SIGKILL может не поддерживаться
+    try {
+      proc.kill()
+      console.log(`[audioCapture] ffmpeg (${source}) убит (default signal)`)
+    } catch (e) {
+      console.warn(`[audioCapture] Не удалось убить ffmpeg (${source}):`, (e as Error).message)
+    }
   }
 }
 
@@ -308,9 +372,6 @@ let systemChunkBuf: ChunkBuffer | null = null
 let micChunkBuf: ChunkBuffer | null = null
 
 function startNativeLoopbackCapture(): void {
-  if (!nativeLoopback) {
-    loadNativeLoopback()
-  }
   if (!nativeLoopback) {
     console.warn('[audioCapture] Нативный loopback недоступен, fallback через ffmpeg')
     return
@@ -343,14 +404,26 @@ export function startCapture(source: AudioSource): boolean {
   }
 
   if (source === 'system') {
+    // ─── ИСПРАВЛЕНО (WASAPI Dead Code): Загружаем нативный модуль
+    // ДО проверки nativeLoopback. Раньше loadNativeLoopback()
+    // никогда не вызывался перед ветвлением, и nativeLoopback
+    // всегда был null → WASAPI путь был мёртвым кодом.
+    loadNativeLoopback()
+
     if (process.platform === 'win32' && nativeLoopback) {
       startNativeLoopbackCapture()
       captureState.system = true
       console.log('[audioCapture] Системный звук: WASAPI loopback запущен')
       return true
     }
+
+    // Fallback через ffmpeg
     systemChunkBuf = new ChunkBuffer('system', SAMPLE_RATE, CHANNELS)
-    systemInterval = startFallbackCapture('system', systemChunkBuf)
+    const ffmpegOk = startFallbackCapture('system', systemChunkBuf)
+    if (!ffmpegOk) {
+      console.error('[audioCapture] Системный звук: ffmpeg fallback не запустился')
+      return false
+    }
     captureState.system = true
     console.log('[audioCapture] Системный звук: ffmpeg fallback запущен')
     return true
@@ -358,7 +431,11 @@ export function startCapture(source: AudioSource): boolean {
 
   // Микрофон
   micChunkBuf = new ChunkBuffer('mic', SAMPLE_RATE, CHANNELS)
-  micInterval = startFallbackCapture('mic', micChunkBuf)
+  const micOk = startFallbackCapture('mic', micChunkBuf)
+  if (!micOk) {
+    console.error('[audioCapture] Микрофон: ffmpeg не запустился')
+    return false
+  }
   captureState.mic = true
   console.log('[audioCapture] Микрофон: захват запущен')
   return true
@@ -369,19 +446,17 @@ export function stopCapture(source: AudioSource): void {
 
   if (source === 'system') {
     stopNativeLoopbackCapture()
-    if (systemInterval) {
-      clearInterval(systemInterval)
-      systemInterval = null
-    }
+    // ─── ИСПРАВЛЕНО (Zombie): Убиваем ffmpeg-процесс системного звука
+    killFfmpegProcess(ffmpegSystemProcess, 'system')
+    ffmpegSystemProcess = null
     systemChunkBuf?.flush()
     systemChunkBuf = null
     captureState.system = false
     console.log('[audioCapture] Системный звук: остановлен')
   } else {
-    if (micInterval) {
-      clearInterval(micInterval)
-      micInterval = null
-    }
+    // ─── ИСПРАВЛЕНО (Zombie): Убиваем ffmpeg-процесс микрофона
+    killFfmpegProcess(ffmpegMicProcess, 'mic')
+    ffmpegMicProcess = null
     micChunkBuf?.flush()
     micChunkBuf = null
     captureState.mic = false

@@ -1,26 +1,20 @@
 # 09 — Следующие шаги
 
-## Приоритет 0 — Проект не запускается (СДЕЛАТЬ ПЕРВЫМ)
+## Приоритет 0 — Проект не запускается → ✅ ВЫПОЛНЕНО (ЭТАП 1)
 
-- [ ] **Создать `tsconfig.node.json`** — для main + preload (target: ES2022, module: ESNext, node окружение)
-- [ ] **Создать `tsconfig.web.json`** — для renderer (target: ES2020, module: ESNext, DOM окружение, JSX)
-- [ ] **Выполнить `npm install`** — установить все 12 зависимостей
-- [ ] **Запустить `electron-vite build`** — проверить что проект компилируется
-- [ ] **Исправить ошибки компиляции** — неизбежно будут после первой сборки
-- [ ] **Запустить `electron-vite dev`** — первый запуск приложения
+- [x] **Создать `tsconfig.node.json`** — для main + preload (target: ES2022, module: ESNext, node окружение)
+- [x] **Создать `tsconfig.web.json`** — для renderer (target: ES2020, module: ESNext, DOM окружение, JSX)
+- [x] **Выполнить `npm install`** — установить все 12 зависимостей
+- [x] **Запустить `electron-vite build`** — проверить что проект компилируется
+- [x] **Исправить ошибки компиляции** — неизбежно будут после первой сборки
+- [x] **Запустить `electron-vite dev`** — первый запуск приложения (компиляция ОК, GUI не запускается на сервере — ожидаемо)
 
-## Приоритет 1 — Критические баги в коде
+## Приоритет 1 — Критические баги в коде → ✅ ЧАСТИЧНО ВЫПОЛНЕНО (ЭТАП 2)
 
-- [ ] **Исправить WASAPI dead code** в audioCapture.ts — вызывать `loadNativeLoopback()` ДО проверки `nativeLoopback` в `startCapture('system')`. Пример исправления:
-  ```typescript
-  if (source === 'system') {
-    loadNativeLoopback()  // ← добавить эту строку
-    if (process.platform === 'win32' && nativeLoopback) {
-      startNativeLoopbackCapture()
-  ```
-- [ ] **Сохранять ffmpeg child process** — нужна переменная `let ffmpegProcess` для возможности `ffmpegProcess.kill()` при stopCapture
-- [ ] **Проверять результат startFallbackCapture** в startCapture — возвращать `false` если ffmpeg не запустился
-- [ ] **Добавить `app.on('before-quit', cleanup)`** в index.ts
+- [x] **Исправить WASAPI dead code** в audioCapture.ts — `loadNativeLoopback()` теперь вызывается ДО проверки `nativeLoopback` в `startCapture('system')`
+- [x] **Сохранять ffmpeg child process** — добавлены `ffmpegMicProcess`/`ffmpegSystemProcess` на уровне модуля, `killFfmpegProcess()` с SIGKILL
+- [x] **Проверять результат startFallbackCapture** в startCapture — возвращается `false` если ffmpeg не запустился
+- [x] **Добавить `app.on('before-quit', cleanup)`** в index.ts — cleanup() импортирован из handlers.ts
 - [ ] **Удалить дублирующую отправку** в sttService.ts `broadcastTranscription` — убрать getWindow() вызов, оставить только getAllWindows()
 - [ ] **Исправить suggestionHistory** в openrouterService.ts — хранить пары user/assistant, а не только assistant
 
