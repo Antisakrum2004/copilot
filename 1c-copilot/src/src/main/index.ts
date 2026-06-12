@@ -1,6 +1,20 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, net } from 'electron'
 import { join } from 'path'
 import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
+
+// ─── ХАК: Направляем fetch через сетевой стек Chromium для обхода блокировок ───
+globalThis.fetch = net.fetch as any
+
+// Прописываем прокси
+app.commandLine.appendSwitch('proxy-server', 'http://153.80.159.108:64218')
+
+// Авторизация на прокси-сервере
+app.on('login', (event, _webContents, _details, authInfo, callback) => {
+  if (authInfo.isProxy) {
+    event.preventDefault()
+    callback('jRUfBEhc', 'YCkn2DPH')
+  }
+})
 
 const gotLock = app.requestSingleInstanceLock()
 
