@@ -1114,12 +1114,21 @@ if (!gotLock) {
     await electron.session.defaultSession.setProxy({
       proxyRules: "http://153.80.159.108:64218"
     });
-    electron.session.defaultSession.on("login", (event, _details, authInfo, callback) => {
+    electron.session.defaultSession.on("login", (event, _webContents, _details, authInfo, callback) => {
       if (authInfo.isProxy) {
         event.preventDefault();
         callback("jRUfBEhc", "YCkn2DPH");
       }
     });
+    const proxyWarmup = new electron.BrowserWindow({ show: false });
+    proxyWarmup.loadURL("https://www.google.com/favicon.ico").catch(() => {
+    });
+    const closeWarmup = () => {
+      if (!proxyWarmup.isDestroyed()) proxyWarmup.destroy();
+    };
+    proxyWarmup.webContents.once("did-finish-load", closeWarmup);
+    proxyWarmup.webContents.once("did-fail-load", closeWarmup);
+    setTimeout(closeWarmup, 3e3);
     const preloadPath = path.join(__dirname, "../preload/index.js");
     registerIpcHandlers();
     createMainWindows(preloadPath);
