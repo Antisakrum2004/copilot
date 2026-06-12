@@ -1096,13 +1096,6 @@ function cleanup() {
   abortStream();
 }
 globalThis.fetch = electron.net.fetch;
-electron.app.commandLine.appendSwitch("proxy-server", "http://153.80.159.108:64218");
-electron.app.on("login", (event, _webContents, _details, authInfo, callback) => {
-  if (authInfo.isProxy) {
-    event.preventDefault();
-    callback("jRUfBEhc", "YCkn2DPH");
-  }
-});
 const gotLock = electron.app.requestSingleInstanceLock();
 if (!gotLock) {
   electron.app.quit();
@@ -1117,7 +1110,16 @@ if (!gotLock) {
   electron.app.on("before-quit", () => {
     cleanup();
   });
-  electron.app.whenReady().then(() => {
+  electron.app.whenReady().then(async () => {
+    await electron.session.defaultSession.setProxy({
+      proxyRules: "http://153.80.159.108:64218"
+    });
+    electron.session.defaultSession.on("login", (event, _details, authInfo, callback) => {
+      if (authInfo.isProxy) {
+        event.preventDefault();
+        callback("jRUfBEhc", "YCkn2DPH");
+      }
+    });
     const preloadPath = path.join(__dirname, "../preload/index.js");
     registerIpcHandlers();
     createMainWindows(preloadPath);
