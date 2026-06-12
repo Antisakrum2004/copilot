@@ -22,7 +22,7 @@
  */
 
 import { ProxyAgent, Agent, setGlobalDispatcher } from 'undici'
-import { session } from 'electron'
+import { session, net } from 'electron'
 
 // ─── Конфигурация прокси ──────────────────────────────────────────
 
@@ -113,7 +113,7 @@ export async function testProxy(): Promise<boolean> {
 export function initSessionProxy(): void {
   try {
     session.defaultSession.setProxy({
-      proxyRules: `${PROXY_HOST}:${PROXY_PORT}`,
+      proxyRules: `http=${PROXY_HOST}:${PROXY_PORT};https=${PROXY_HOST}:${PROXY_PORT}`,
       proxyBypassRules: '<-loopback>, localhost, 127.0.0.1'
     })
 
@@ -133,6 +133,48 @@ export function initSessionProxy(): void {
   } catch (err) {
     console.warn('[proxy] Не удалось настроить Electron session proxy:', (err as Error).message)
   }
+}
+
+/**
+ * Проверяет что net.request может пройти через прокси с авторизацией.
+ * Делает тестовый HTTPS-запрос через Chromium network stack.
+ * Возвращает true если прокси + auth работают для net.request.
+ */
+export function testSessionProxy(): Promise<boolean> {
+  return new Promise((resolve) => {
+    console.log('[proxy] Диагностика net.request: проверяем прокси-соединение через Chromium stack...')
+
+    const request = net.request({
+      method: 'GET',
+      url: 'https://openrouter.ai/api/v1/models'
+    })
+
+    request.setHeader('Authorization', 'Bearer test')
+
+    const timeout = setTimeout(() => {
+      request.abort()
+      console.warn('[proxy] net.request: ТАЙМАУТ (10с) — прокси не отвечает')
+      resolve(false)
+    }, 10000)
+
+    request.on('response', (response) => {
+      clearTimeout(timeout)
+      // Любой HTTP ответ (даже 401/403) означает, что прокси-туннель работает
+      console.log(`[proxy] net.request: РАБОТАЕТ — HTTP ${response.statusCode} от openrouter.ai через прокси`)
+      // Выкачиваем тело ответа чтобы не зависло
+      response.on('data', () => {})
+      response.on('end', () => {})
+      resolve(true)
+    })
+
+    request.on('error', (err) => {
+      clearTimeout(timeout)
+      console.error(`[proxy] net.request: ОШИБКА — ${err.message}`)
+      resolve(false)
+    })
+
+    request.end()
+  })
 }
 
 /**

@@ -124,6 +124,8 @@ function isNotSilence(pcmBuffer: Buffer): boolean {
     return false
   }
 
+  // Логируем прошедшие чанки для калибровки порога
+  console.log(`[sttService] Silence Gate: чанк ПРОШЁЛ (max amp: ${maxAmplitude}, порог: ${SILENCE_THRESHOLD}) — отправляем на API`)
   return true
 }
 

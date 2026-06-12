@@ -9,7 +9,7 @@ import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 //    session.setProxy + session.on('login') — автоматическая авторизация
 // Node.js fetch игнорирует настройки прокси Electron сессии,
 // поэтому нужны оба подхода.
-import { initProxy, initSessionProxy, testProxy, isProxyEnabled } from './services/proxyFetch'
+import { initProxy, initSessionProxy, testProxy, testSessionProxy, isProxyEnabled } from './services/proxyFetch'
 
 // Устанавливаем undici ProxyAgent как глобальный диспетчер для Node.js fetch
 initProxy()
@@ -54,6 +54,16 @@ if (!gotLock) {
       console.warn('[proxy] setProxy FAILED — работаем напрямую')
     }
     console.log(`[proxy] Режим: ${isProxyEnabled() ? 'ПРОКСИ' : 'ПРЯМОЕ'}`)
+
+    // ─── Диагностика net.request через прокси ───
+    // Проверяем что net.request (для OpenRouter) может пройти через
+    // прокси с авторизацией через Chromium network stack.
+    const sessionProxyOk = await testSessionProxy()
+    if (sessionProxyOk) {
+      console.log('[proxy] net.request + session proxy: OK')
+    } else {
+      console.warn('[proxy] net.request + session proxy: FAILED — OpenRouter может не работать')
+    }
 
     const preloadPath = join(__dirname, '../preload/index.js')
     registerIpcHandlers()
