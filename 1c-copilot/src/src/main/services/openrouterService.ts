@@ -7,8 +7,11 @@
  * По мере прихода токенов сразу транслирует их
  * в оверлей подсказок через IPC-канал suggestion:update-content.
  *
- * Модель по умолчанию: qwen/qwen-2.5-coder-32b-instruct
- * Альтернатива: anthropic/claude-3.5-sonnet
+ * Модель по умолчанию: google/gemini-2.0-flash-001 (быстрая, умная)
+ *
+ * SSE-стриминг использует стандартный Node.js fetch (undici ProxyAgent),
+ * НЕ net.fetch — глобальный хак globalThis.fetch = net.fetch ломал
+ * ReadableStream.getReader() и SSE-парсинг.
  */
 
 import { BrowserWindow } from 'electron'
@@ -20,7 +23,7 @@ import { fetchWithFallback } from './proxyFetch'
 // ─── Конфигурация ────────────────────────────────────────────────────
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
-const DEFAULT_MODEL = 'qwen/qwen-2.5-coder-32b-instruct'
+const DEFAULT_MODEL = 'google/gemini-2.0-flash-001'
 
 /** Системный промпт — жёстко зашит в код */
 const SYSTEM_PROMPT = `Ты — ведущий архитектор и эксперт по разработке на платформе 1С:Предприятие 8. Ты анализируешь живой текст созвона (техническое интервью, проектирование архитектуры, разбор багов). Твоя задача — выводить на экран КРАТКИЕ, емкие технические подсказки, шаблоны кода, особенности БСП (Библиотеки Стандартных Подсистем), оптимальные индексы для запросов, методы оптимизации и предупреждения о типичных ошибках (например, запросы в цикле, неявные соединения). Никакой лишней воды и общих фраз — только сухая выжимка, функции и конструкции, которые прямо сейчас помогут разработчику в диалоге. Пиши в формате Markdown.`
@@ -71,8 +74,11 @@ function broadcastSuggestion(payload: SuggestionUpdatePayload): void {
 
 /**
  * Отправляет запрос на OpenRouter API с потоковой генерацией.
- * Читает ReadableStream и по мере прихода токенов
+ * Читает ReadableStream через .getReader() и по мере прихода токенов
  * транслирует их в оверлей через IPC.
+ *
+ * SSE работает через стандартный Node.js fetch (undici ProxyAgent),
+ * НЕ через net.fetch — глобальный хак ломал ReadableStream.
  */
 export async function streamSuggestion(
   customTranscript?: string
@@ -89,8 +95,6 @@ export async function streamSuggestion(
     return
   }
 
-  console.log(`[openrouter] Отправка запроса: модель=${model}, контекст=${contextText.length} символов`)
-
   // Если уже стримим — прерываем предыдущий запрос
   if (isStreaming) {
     abortStream()
@@ -103,10 +107,12 @@ export async function streamSuggestion(
     return
   }
 
+  const contextText = trimContext(transcript)
+
+  console.log(`[openrouter] Отправка запроса: модель=${model}, контекст=${contextText.length} символов`)
+
   isStreaming = true
   streamAbortController = new AbortController()
-
-  const contextText = trimContext(transcript)
 
   // Формируем сообщения для API
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
@@ -125,7 +131,8 @@ export async function streamSuggestion(
   })
 
   try {
-    // fetchWithFallback: сначала через прокси, если упал — автоматически напрямую
+    // Стандартный Node.js fetch через undici ProxyAgent (НЕ net.fetch!)
+    // net.fetch ломал SSE-стриминг: ReadableStream.getReader() не работал
     const response = await fetchWithFallback(OPENROUTER_URL, {
       method: 'POST',
       headers: {
@@ -157,7 +164,7 @@ export async function streamSuggestion(
 
     const reader = response.body?.getReader()
     if (!reader) {
-      console.error('[openrouter] Нет response body')
+      console.error('[openrouter] Нет response body — SSE стрим не доступен')
       isStreaming = false
       return
     }
@@ -214,13 +221,9 @@ export async function streamSuggestion(
       if (suggestionHistory.length > 3) {
         suggestionHistory = suggestionHistory.slice(-3)
       }
-    }
-
-    if (fullContent) {
       console.log(`[openrouter] Подсказка сгенерирована (${fullContent.length} символов)`)
     } else {
       console.warn('[openrouter] LLM вернул пустой ответ')
-      broadcastSuggestion({ content: '', streaming: false })
     }
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
@@ -280,24 +283,15 @@ export function manualSuggestion(): void {
 
 // ─── Инициализация ───────────────────────────────────────────────────
 
-/**
- * Инициализировать OpenRouter-сервис.
- */
 export function initOpenRouterService(getWindowFn: () => BrowserWindow | null): void {
   getWindow = getWindowFn
   console.log('[openrouter] Инициализирован')
 }
 
-/**
- * Получить текущее состояние стриминга.
- */
 export function isStreamingActive(): boolean {
   return isStreaming
 }
 
-/**
- * Сбросить историю подсказок.
- */
 export function clearSuggestionHistory(): void {
   suggestionHistory = []
 }

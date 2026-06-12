@@ -5,13 +5,12 @@
  * отправляет их на Groq Whisper API или OpenAI Whisper API,
  * получает текст и транслирует его в renderer через IPC.
  *
- * Поддержка:
- *   - Groq (whisper-large-v3) — быстрый, бесплатно до лимитов
- *   - OpenAI (whisper-1) — стандартный, платный
- *
- * Rate limiting: Groq free tier = 20 RPM.
- * С 6-секундными чанками и 2 потоками (mic+system) = ~20 RPM.
- * Добавлена пауза 3с между запросами + retry при 429.
+ * Ключевые оптимизации:
+ *   - Silence Gate: чанки с амплитудой < 400/32768 отклоняются ДО отправки
+ *     (предотвращает галлюцинации Whisper типа «Продолжение следует...»
+ *     и экономит rate limit Groq)
+ *   - Rate limiting: 3с пауза между запросами + retry при 429
+ *   - fetch через undici ProxyAgent (НЕ net.fetch — баг Electron #44249)
  */
 
 import { BrowserWindow } from 'electron'
@@ -29,6 +28,10 @@ const WHISPER_MODEL_OPENAI = 'whisper-1'
 
 // Минимальный размер чанка для отправки (иначе Whisper может вернуть пустой результат)
 const MIN_CHUNK_SIZE_BYTES = 32000 // ~1 сек при 16kHz 16-bit mono
+
+// Silence Gate: порог амплитуды PCM Int16 (0-32768)
+// Значение ниже → цифр тишина → не отправляем на API
+const SILENCE_THRESHOLD = 400 // ~1.2% от полной шкалы
 
 // Rate limit: пауза между последовательными запросами (мс)
 const REQUEST_DELAY_MS = 3000 // 3с → max 20 RPM (лимит Groq free)
@@ -64,11 +67,48 @@ let getWindow: (() => BrowserWindow | null) | null = null
 let accumulatedTranscript: string = ''
 let lastTranscriptTime = 0
 
+// Статистика silence gate
+let silenceRejectedCount = 0
+
 // ─── Вспомогательные функции ─────────────────────────────────────────
 
 /** Пауза */
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Проверяет PCM-буфер на цифровую тишину.
+ * Анализирует амплитуду Int16 сэмплов: если максимальная
+ * амплитуда ниже порога — это тишина (шум микрофона).
+ * Предотвращает галлюцинации Whisper («Продолжение следует...»)
+ * и экономит rate limit Groq.
+ *
+ * @returns true если чанк содержит речь, false если тишина
+ */
+function isNotSilence(pcmBuffer: Buffer): boolean {
+  const int16Array = new Int16Array(
+    pcmBuffer.buffer,
+    pcmBuffer.byteOffset,
+    pcmBuffer.byteLength / 2
+  )
+
+  let maxAmplitude = 0
+  for (let i = 0; i < int16Array.length; i++) {
+    const abs = Math.abs(int16Array[i])
+    if (abs > maxAmplitude) maxAmplitude = abs
+  }
+
+  if (maxAmplitude < SILENCE_THRESHOLD) {
+    silenceRejectedCount++
+    if (silenceRejectedCount % 5 === 1) {
+      // Логируем не каждый раз, чтобы не спамить (раз в 5 отверженных)
+      console.log(`[sttService] Silence Gate: чанк отклонён (max amp: ${maxAmplitude}, порог: ${SILENCE_THRESHOLD}, всего отклонено: ${silenceRejectedCount})`)
+    }
+    return false
+  }
+
+  return true
 }
 
 /**
@@ -110,6 +150,11 @@ function createWavBuffer(pcmData: Buffer, sampleRate: number, channels: number):
 /**
  * Отправляет аудио-чанк на Whisper API через Multipart Form Data.
  * С поддержкой retry при 429 (rate limit).
+ *
+ * ВАЖНО: используется fetchWithFallback (undici ProxyAgent),
+ * а НЕ net.fetch. Причина: Electron bug #44249 —
+ * net.fetch НЕ триггерит session.on('login') для прокси-авторизации,
+ * туннель падает с ERR_TUNNEL_CONNECTION_FAILED.
  */
 async function transcribeChunk(
   wavBuffer: Buffer,
@@ -170,6 +215,8 @@ async function transcribeChunk(
   // ─── Retry loop для 429 ───
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      // fetchWithFallback: через прокси (undici ProxyAgent),
+      // если прокси недоступен — автоматически напрямую
       const response = await fetchWithFallback(url, {
         method: 'POST',
         headers: {
@@ -217,6 +264,9 @@ async function transcribeChunk(
  * Обрабатывает очередь аудио-чанков.
  * Отправляет чанки по одному с паузой REQUEST_DELAY_MS между запросами,
  * чтобы не превысить rate limit Groq (20 RPM).
+ *
+ * Silence Gate: чанки с амплитудой < порога отклоняются ДО конвертации в WAV,
+ * что экономит rate limit и предотвращает галлюцинации Whisper.
  */
 async function processQueue(): Promise<void> {
   if (isProcessing || sttQueue.length === 0) return
@@ -227,12 +277,17 @@ async function processQueue(): Promise<void> {
     const item = sttQueue.shift()!
     const { source, chunk, sampleRate, channels } = item
 
-    // Пропускаем слишком короткие чанки (тишина)
+    // Пропускаем слишком короткие чанки
     if (chunk.length < MIN_CHUNK_SIZE_BYTES) {
       continue
     }
 
-    // Оборачиваем PCM в WAV
+    // ─── Silence Gate: отклоняем тишину ДО конвертации в WAV ───
+    if (!isNotSilence(chunk)) {
+      continue // Тишина — не отправляем на API
+    }
+
+    // Оборачиваем PCM в WAV (только для чанков с речью)
     const wavBuffer = createWavBuffer(chunk, sampleRate, channels)
 
     // Отправляем на транскрипцию
@@ -256,7 +311,6 @@ async function processQueue(): Promise<void> {
     }
 
     // ─── Rate limit: пауза между запросами ───
-    // Groq free = 20 RPM → 3с между запросами
     if (sttQueue.length > 0) {
       await sleep(REQUEST_DELAY_MS)
     }
@@ -269,13 +323,6 @@ async function processQueue(): Promise<void> {
  * Отправляет результат транскрипции во все окна renderer.
  */
 function broadcastTranscription(payload: TranscriptionUpdatePayload): void {
-  if (!getWindow) return
-  const win = getWindow()
-  if (win && !win.isDestroyed()) {
-    win.webContents.send(IPC.transcription.update, payload)
-  }
-
-  // Также транслируем во все окна (toolbar, suggestion, transcript)
   const allWindows = BrowserWindow.getAllWindows()
   for (const w of allWindows) {
     if (!w.isDestroyed()) {
@@ -286,19 +333,11 @@ function broadcastTranscription(payload: TranscriptionUpdatePayload): void {
 
 // ─── Публичный API ───────────────────────────────────────────────────
 
-/**
- * Инициализировать STT-сервис.
- * @param getWindowFn — функция, возвращающая главное окно приложения
- */
 export function initSttService(getWindowFn: () => BrowserWindow | null): void {
   getWindow = getWindowFn
-  console.log('[sttService] Инициализирован')
+  console.log('[sttService] Инициализирован (Silence Gate: порог < 400/32768)')
 }
 
-/**
- * Добавить аудио-чанк в очередь на транскрипцию.
- * Вызывается из audioCapture при накоплении чанка.
- */
 export function enqueueChunk(
   source: AudioSource,
   chunk: Buffer,
@@ -306,38 +345,24 @@ export function enqueueChunk(
   _channels: number
 ): void {
   sttQueue.push({ source, chunk, sampleRate: _sampleRate, channels: _channels })
-
-  // Запускаем обработку очереди (асинхронно, без await)
   void processQueue()
 }
 
-/**
- * Получить накопленный текст созвона.
- * Используется OpenRouter-сервисом для контекста.
- */
 export function getAccumulatedTranscript(): string {
   return accumulatedTranscript
 }
 
-/**
- * Получить время последней транскрипции.
- */
 export function getLastTranscriptTime(): number {
   return lastTranscriptTime
 }
 
-/**
- * Сбросить накопленную транскрипцию.
- */
 export function clearTranscript(): void {
   accumulatedTranscript = ''
   lastTranscriptTime = 0
   sttQueue = []
+  silenceRejectedCount = 0
 }
 
-/**
- * Получить длину очереди (для диагностики).
- */
 export function getQueueLength(): number {
   return sttQueue.length
 }

@@ -70,7 +70,7 @@ export type AppSettings = {
 
 export const DEFAULT_SETTINGS: AppSettings = {
   openRouterApiKey: '',
-  openRouterModel: 'qwen/qwen-2.5-coder-32b-instruct',
+  openRouterModel: 'google/gemini-2.0-flash-001',
   sttApiKey: '',
   sttProvider: 'groq',
   overlayOpacity: 0.85,
