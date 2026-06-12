@@ -1,20 +1,9 @@
-import { app, BrowserWindow, net } from 'electron'
+import { app, BrowserWindow, net, session } from 'electron'
 import { join } from 'path'
 import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 
 // ─── ХАК: Направляем fetch через сетевой стек Chromium для обхода блокировок ───
 globalThis.fetch = net.fetch as any
-
-// Прописываем прокси
-app.commandLine.appendSwitch('proxy-server', 'http://153.80.159.108:64218')
-
-// Авторизация на прокси-сервере
-app.on('login', (event, _webContents, _details, authInfo, callback) => {
-  if (authInfo.isProxy) {
-    event.preventDefault()
-    callback('jRUfBEhc', 'YCkn2DPH')
-  }
-})
 
 const gotLock = app.requestSingleInstanceLock()
 
@@ -36,7 +25,20 @@ if (!gotLock) {
     cleanup()
   })
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // Настраиваем прокси для дефолтной сессии Chromium
+    await session.defaultSession.setProxy({
+      proxyRules: 'http://153.80.159.108:64218'
+    })
+
+    // Навешиваем авторизацию прямо на сессию
+    session.defaultSession.on('login', (event, _details, authInfo, callback) => {
+      if (authInfo.isProxy) {
+        event.preventDefault()
+        callback('jRUfBEhc', 'YCkn2DPH')
+      }
+    })
+
     const preloadPath = join(__dirname, '../preload/index.js')
     registerIpcHandlers()
     createMainWindows(preloadPath)
