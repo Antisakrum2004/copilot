@@ -1,4 +1,4 @@
-# 1C-Copilot — Memory Bank (V1.0.0, обновлено 2026-06-13)
+# 1C-Copilot — Memory Bank (V1.1.0, обновлено 2026-06-13)
 
 ---
 
@@ -21,7 +21,7 @@
 | Системный звук (fallback) | ffmpeg | dshow / avfoundation / alsa |
 | STT | Groq / OpenAI Whisper API | whisper-large-v3 / whisper-1 |
 | LLM | OpenRouter API | qwen/qwen-2.5-coder-32b-instruct |
-| Прокси | Electron session.setProxy | 153.80.159.108:64218 |
+| Прокси | undici ProxyAgent | Node.js native fetch через HTTP прокси |
 
 ### Архитектура
 
@@ -44,7 +44,7 @@
 │                                        → enqueueChunk()           │
 │                                        → sttService (Whisper API) │
 │                                        → openrouterService (SSE)  │
-│  Прокси: session.setProxy + warmup BrowserWindow (Electron #44249)│
+│  Прокси: undici ProxyAgent → Node.js fetch (НЕ Chromium net.fetch)│
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -89,10 +89,12 @@
 - Первый вызов показывает диалог разрешения
 - IPC serialization: ~8KB на чанк (4096 float32 сэмплов)
 
-### Прокси (Electron)
-- `session.defaultSession.setProxy({ proxyRules: '153.80.159.108:64218' })` — БЕЗ `http://` префикса!
-- Баг Electron #44249: `net.fetch` не триггерит `session.on('login')` — нужен warmup через BrowserWindow
-- Сигнатура `session.on('login')`: `(event, webContents, details, authInfo, callback)` — 5 аргументов, не 4!
+### Прокси (undici)
+- **НЕ используем Chromium net.fetch** — баг Electron #44249: `net.fetch` не триггерит `session.on('login')` для прокси-авторизации
+- Прогрев через BrowserWindow тоже НЕ помог — туннель падает до этапа авторизации
+- **Решение**: `undici.ProxyAgent` + `setGlobalDispatcher` → Node.js native `fetch` идёт через прокси
+- Credentials встроены в URL: `http://user:pass@host:port`
+- НЕ нужно `session.setProxy`, НЕ нужен `session.on('login')`, НЕ нужен warmup BrowserWindow
 
 ---
 
@@ -102,7 +104,7 @@
 
 | Файл | Строки | Роль |
 |------|--------|------|
-| `index.ts` | 55 | Точка входа. Single-instance lock, proxy setup, warmup, cleanup на before-quit |
+| `index.ts` | 55 | Точка входа. Single-instance lock, undici ProxyAgent, cleanup на before-quit |
 | `ipc/handlers.ts` | 378 | 30+ IPC обработчиков. Пайплайн audio→STT→LLM |
 | `services/audioCapture.ts` | 552 | Mic: IPC от Renderer. System: WASAPI/ffmpeg. ChunkBuffer 6с |
 | `services/sttService.ts` | 308 | Очередь → Whisper API. БАГ: дубли broadcastTranscription |
@@ -132,7 +134,7 @@
 
 ## 4. Текущее состояние
 
-**V1.0.0** — Проект собирается (`electron-vite build` OK). Аудио-пайплайн реорганизован: микрофон через getUserMedia в Renderer, системный звук через WASAPI в Main. Прокси настроен через session.setProxy. Рантайм тестируется на Windows.
+**V1.1.0** — Проект собирается (`electron-vite build` OK). Аудио-пайплайн реорганизован: микрофон через getUserMedia в Renderer, системный звук через WASAPI в Main. Прокси переведён на `undici ProxyAgent` (вместо сломанного Chromium `net.fetch`). Рантайм тестируется на Windows.
 
 ### Статус typecheck: 5 ОШИБОК
 | Файл | Код | Описание |
@@ -142,6 +144,7 @@
 | main.tsx | TS1259/TS1192 | default import React вместо namespace |
 
 ### История
+- **V1.1.0**: Прокси переписан на undici ProxyAgent (Chromium net.fetch не работал с прокси-авторизацией)
 - **V1.0.0**: getUserMedia миграция, proxy session.setProxy, warmup hack, debug overlay
 - **v0.0.1-alpha ЭТАП 2**: WASAPI оживлён, ffmpeg zombie fixed, cleanup зарегистрирован
 - **v0.0.1-alpha ЭТАП 1**: Первый успешный билд, tsconfig созданы, npm install
@@ -178,7 +181,8 @@
 7. **Stereo Mix** — отключён по умолчанию на большинстве машин. Решение: WASAPI loopback.
 8. **app.commandLine.appendSwitch('proxy-server')** — ERR_TUNNEL_CONNECTION_FAILED, ломает HTTPS. Решение: session.setProxy без http:// префикса.
 9. **session.on('login') без webContents** — сдвиг параметров, authInfo.isProxy всегда false. Решение: правильная 5-аргументная сигнатура.
-10. **net.fetch не триггерит session.on('login')** (Electron #44249). Решение: warmup через невидимое BrowserWindow.
+10. **net.fetch + session.on('login')** (Electron #44249) — net.fetch НЕ триггерит login-событие, даже с правильной сигнатурой. Решение: undici ProxyAgent.
+11. **Proxy warmup через BrowserWindow** — прогрев не помог, потому что Chromium туннель падает ДО этапа авторизации (ERR_TUNNEL_CONNECTION_FAILED), login-событие никогда не вызывается. Решение: undici ProxyAgent.
 
 ---
 
@@ -192,9 +196,8 @@
 6. **6-секундные чанки** — баланс качества Whisper и задержки
 7. **Ручной multipart** — без зависимостей, полный контроль
 8. **Последовательная STT-очередь** — rate limit + порядок результатов
-9. **session.setProxy без http://** — чистый формат работает для HTTP и HTTPS туннелей
-10. **Proxy warmup BrowserWindow** — обходит баг Electron #44249 (net.fetch не вызывает login)
-11. **Debug overlay (#14141e)** — видимые окна для отладки на Windows-машине
+9. **undici ProxyAgent вместо Chromium proxy** — net.fetch не поддерживает прокси-авторизацию (Electron #44249), Node.js fetch через ProxyAgent работает надёжно
+10. **Debug overlay (#14141e)** — видимые окна для отладки на Windows-машине
 
 ---
 
@@ -231,9 +234,9 @@ PCM 16000 Hz, 1 канал (моно), 16-bit (s16le)
 5. НЕ забывай `language: "ru"` для Whisper
 6. НЕ парси SSE без буферизации — `buffer = lines.pop()`
 7. НЕ ставь captureState=true до проверки что процесс жив
-8. НЕ используй `http://` в proxyRules — ломает HTTPS туннель
-9. НЕ пропускай `webContents` в session.on('login') — 5 аргументов, не 4
-10. НЕ полагайся на net.fetch для прокси-авторизации — нужен warmup BrowserWindow
+8. НЕ используй `net.fetch` для прокси — баг Electron #44249 (не триггерит login)
+9. НЕ полагайся на session.on('login') + warmup — используй undici ProxyAgent
+10. НЕ ставь `http://` в proxyRules — ломает HTTPS туннель (для Chromium proxy)
 
 ---
 
@@ -260,7 +263,7 @@ PCM 16000 Hz, 1 канал (моно), 16-bit (s16le)
 
 ### Приоритет 4 🟡 — Windows runtime
 - [ ] Полный цикл: микрофон → STT → транскрипция → LLM → подсказки
-- [ ] Проверить прокси-авторизацию (ждём [ProxyAuth] в логах)
+- [ ] Проверить прокси через undici ProxyAgent (смотреть [Proxy] в логах)
 
 ### Приоритет 5+ 🟢
 - [ ] Markdown-рендеринг, горячие клавиши, системный трей, VAD, тесты, electron-builder

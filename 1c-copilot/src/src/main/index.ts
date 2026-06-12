@@ -1,9 +1,27 @@
-import { app, BrowserWindow, net, session } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 
-// ─── ХАК: Направляем fetch через сетевой стек Chromium для обхода блокировок ───
-globalThis.fetch = net.fetch as any
+// ─── ПРОКСИ через Node.js (undici), а не через Chromium ───
+// Chromium net.fetch НЕ поддерживает прокси-авторизацию (Electron bug #44249):
+//   session.on('login') не триггерится для net.fetch,
+//   прогрев через BrowserWindow тоже не помогает — туннель падает
+//   с ERR_TUNNEL_CONNECTION_FAILED до этапа авторизации.
+// Решение: используем Node.js native fetch + undici ProxyAgent,
+// который полностью обходит стек Chromium и шлёт авторизацию сам.
+import { ProxyAgent, setGlobalDispatcher } from 'undici'
+
+const PROXY_HOST = '153.80.159.108'
+const PROXY_PORT = '64218'
+const PROXY_USER = 'jRUfBEhc'
+const PROXY_PASS = 'YCkn2DPH'
+const PROXY_URL = `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}`
+
+setGlobalDispatcher(new ProxyAgent(PROXY_URL))
+console.log(`[Proxy] undici ProxyAgent установлен: ${PROXY_HOST}:${PROXY_PORT}`)
+
+// ВАЖНО: НЕ переопределяем globalThis.fetch на net.fetch!
+// Node.js native fetch (undici-based) теперь идёт через прокси автоматически.
 
 const gotLock = app.requestSingleInstanceLock()
 
@@ -26,33 +44,6 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    // Настраиваем прокси для дефолтной сессии Chromium
-    await session.defaultSession.setProxy({
-      proxyRules: '153.80.159.108:64218' // Без http:// в начале, чтобы работал HTTPS туннель!
-    })
-
-    // Навешиваем авторизацию прямо на сессию (исправлена сигнатура: добавлен webContents)
-    session.defaultSession.on('login', (event, _webContents, _details, authInfo, callback) => {
-      console.log(`[ProxyAuth] Запрос авторизации для хоста: ${authInfo.host}, proxy: ${authInfo.isProxy}`)
-      if (authInfo.isProxy) {
-        event.preventDefault()
-        console.log('[ProxyAuth] Токены валидны. Отправляем логин и пароль в Chromium...')
-        callback('jRUfBEhc', 'YCkn2DPH')
-      }
-    })
-
-    // Прогрев кэша прокси для обхода бага net.fetch (Electron #44249)
-    const proxyWarmup = new BrowserWindow({ show: false })
-    proxyWarmup.loadURL('https://www.google.com/favicon.ico').catch(() => {})
-
-    const closeWarmup = () => {
-      if (!proxyWarmup.isDestroyed()) proxyWarmup.destroy()
-    }
-    // Закрываем как только получили ответ или упали, либо по защитному таймауту
-    proxyWarmup.webContents.once('did-finish-load', closeWarmup)
-    proxyWarmup.webContents.once('did-fail-load', closeWarmup)
-    setTimeout(closeWarmup, 3000)
-
     const preloadPath = join(__dirname, '../preload/index.js')
     registerIpcHandlers()
     createMainWindows(preloadPath)
