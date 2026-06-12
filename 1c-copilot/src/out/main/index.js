@@ -1112,11 +1112,14 @@ if (!gotLock) {
   });
   electron.app.whenReady().then(async () => {
     await electron.session.defaultSession.setProxy({
-      proxyRules: "http://153.80.159.108:64218"
+      proxyRules: "153.80.159.108:64218"
+      // Без http:// в начале, чтобы работал HTTPS туннель!
     });
     electron.session.defaultSession.on("login", (event, _webContents, _details, authInfo, callback) => {
+      console.log(`[ProxyAuth] Запрос авторизации для хоста: ${authInfo.host}, proxy: ${authInfo.isProxy}`);
       if (authInfo.isProxy) {
         event.preventDefault();
+        console.log("[ProxyAuth] Токены валидны. Отправляем логин и пароль в Chromium...");
         callback("jRUfBEhc", "YCkn2DPH");
       }
     });
