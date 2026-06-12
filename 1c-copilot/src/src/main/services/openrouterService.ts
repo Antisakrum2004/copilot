@@ -15,6 +15,7 @@ import { BrowserWindow } from 'electron'
 import { IPC, type SuggestionUpdatePayload, type AppSettings } from '@shared/ipc'
 import { getSetting } from '../store/settings'
 import { getAccumulatedTranscript, getLastTranscriptTime } from './sttService'
+import { fetchWithFallback } from './proxyFetch'
 
 // ─── Конфигурация ────────────────────────────────────────────────────
 
@@ -122,7 +123,8 @@ export async function streamSuggestion(
   })
 
   try {
-    const response = await fetch(OPENROUTER_URL, {
+    // fetchWithFallback: сначала через прокси, если упал — автоматически напрямую
+    const response = await fetchWithFallback(OPENROUTER_URL, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,

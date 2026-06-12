@@ -7,18 +7,13 @@ import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 //   session.on('login') не триггерится для net.fetch,
 //   прогрев через BrowserWindow тоже не помогает — туннель падает
 //   с ERR_TUNNEL_CONNECTION_FAILED до этапа авторизации.
-// Решение: используем Node.js native fetch + undici ProxyAgent,
-// который полностью обходит стек Chromium и шлёт авторизацию сам.
-import { ProxyAgent, setGlobalDispatcher } from 'undici'
+// Решение: undici ProxyAgent + setGlobalDispatcher — Node.js native fetch
+// идёт через прокси, авторизация встроена в URL.
+// Если прокси недоступен — автоматически fallback на прямое соединение.
+import { initProxy, testProxy, isProxyEnabled } from './services/proxyFetch'
 
-const PROXY_HOST = '153.80.159.108'
-const PROXY_PORT = '64218'
-const PROXY_USER = 'jRUfBEhc'
-const PROXY_PASS = 'YCkn2DPH'
-const PROXY_URL = `http://${PROXY_USER}:${PROXY_PASS}@${PROXY_HOST}:${PROXY_PORT}`
-
-setGlobalDispatcher(new ProxyAgent(PROXY_URL))
-console.log(`[Proxy] undici ProxyAgent установлен: ${PROXY_HOST}:${PROXY_PORT}`)
+// Устанавливаем ProxyAgent как глобальный диспетчер
+initProxy()
 
 // ВАЖНО: НЕ переопределяем globalThis.fetch на net.fetch!
 // Node.js native fetch (undici-based) теперь идёт через прокси автоматически.
@@ -36,7 +31,7 @@ if (!gotLock) {
     }
   })
 
-  // ─── ИСПРАВЛЕНО: Глобальная очистка при выходе приложения ───
+  // ─── Глобальная очистка при выходе приложения ───
   // Останавливает все аудио-стримы и убивает ffmpeg-процессы
   // перед завершением, предотвращая зомби-процессы.
   app.on('before-quit', () => {
@@ -44,6 +39,17 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
+    // ─── Диагностика прокси (ЗАДАЧА 1) ───
+    // Проверяем что прокси реально работает ДО создания окон.
+    // Если прокси недоступен — автоматически переключимся на direct.
+    const proxyOk = await testProxy()
+    if (proxyOk) {
+      console.log('[proxy] setProxy OK — прокси работает')
+    } else {
+      console.warn('[proxy] setProxy FAILED — работаем напрямую')
+    }
+    console.log(`[proxy] Режим: ${isProxyEnabled() ? 'ПРОКСИ' : 'ПРЯМОЕ'}`)
+
     const preloadPath = join(__dirname, '../preload/index.js')
     registerIpcHandlers()
     createMainWindows(preloadPath)

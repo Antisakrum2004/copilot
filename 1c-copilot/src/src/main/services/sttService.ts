@@ -14,6 +14,7 @@ import { BrowserWindow } from 'electron'
 import { IPC, type TranscriptionUpdatePayload, type AppSettings } from '@shared/ipc'
 import { getSetting } from '../store/settings'
 import type { AudioSource } from './audioCapture'
+import { fetchWithFallback } from './proxyFetch'
 
 // ─── Конфигурация ────────────────────────────────────────────────────
 
@@ -151,13 +152,14 @@ async function transcribeChunk(
   const body = Buffer.concat(parts)
 
   try {
-    const response = await fetch(url, {
+    // fetchWithFallback: сначала через прокси, если упал — автоматически напрямую
+    const response = await fetchWithFallback(url, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
         'Content-Type': `multipart/form-data; boundary=${boundary}`
       },
-      body
+      body: new Uint8Array(body) // Uint8Array вместо Buffer для совместимости
     })
 
     if (!response.ok) {
