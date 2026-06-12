@@ -1,0 +1,12 @@
+{
+  "name": "shadowhint-process-loopback",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Win10 Process Loopback audio capture (bypasses device APO chain like Logitech HX2E surround).",
+  "main": "index.js",
+  "scripts": {
+    "build": "node-gyp configure build",
+    "rebuild": "node-gyp rebuild",
+    "rebuild:electron": "electron-rebuild --module-dir . --version=$ELECTRON_VERSION"
+  }
+}
