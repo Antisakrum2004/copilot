@@ -4,26 +4,26 @@
  * Отправляет накопленный текст созвона на OpenRouter API
  * с параметром stream: true для потоковой генерации.
  *
- * По мере прихода токенов сразу транслирует их
- * в оверлей подсказок через IPC-канал suggestion:update-content.
+ * АРХИТЕКТУРА v2 — Electron net.request вместо Node.js fetch:
+ *   - net.request использует Chromium network stack
+ *   - Автоматическая маршрутизация через прокси с авторизацией
+ *     (session.setProxy + session.on('login'))
+ *   - SSE-стриминг через response.on('data') — надёжнее,
+ *     чем ReadableStream.getReader() через undici ProxyAgent
+ *   - Node.js fetch игнорирует настройки прокси Electron сессии
  *
- * Модель по умолчанию: google/gemini-2.0-flash-001 (быстрая, умная)
- *
- * SSE-стриминг использует стандартный Node.js fetch (undici ProxyAgent),
- * НЕ net.fetch — глобальный хак globalThis.fetch = net.fetch ломал
- * ReadableStream.getReader() и SSE-парсинг.
+ * Модель по умолчанию: google/gemini-2.5-flash
  */
 
-import { BrowserWindow } from 'electron'
-import { IPC, type SuggestionUpdatePayload, type AppSettings } from '@shared/ipc'
+import { BrowserWindow, net } from 'electron'
+import { IPC, type SuggestionUpdatePayload } from '@shared/ipc'
 import { getSetting } from '../store/settings'
-import { getAccumulatedTranscript, getLastTranscriptTime } from './sttService'
-import { fetchWithFallback } from './proxyFetch'
+import { getAccumulatedTranscript } from './sttService'
 
 // ─── Конфигурация ────────────────────────────────────────────────────
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
-const DEFAULT_MODEL = 'google/gemini-2.0-flash-001'
+const DEFAULT_MODEL = 'google/gemini-2.5-flash'
 
 /** Системный промпт — жёстко зашит в код */
 const SYSTEM_PROMPT = `Ты — ведущий архитектор и эксперт по разработке на платформе 1С:Предприятие 8. Ты анализируешь живой текст созвона (техническое интервью, проектирование архитектуры, разбор багов). Твоя задача — выводить на экран КРАТКИЕ, емкие технические подсказки, шаблоны кода, особенности БСП (Библиотеки Стандартных Подсистем), оптимальные индексы для запросов, методы оптимизации и предупреждения о типичных ошибках (например, запросы в цикле, неявные соединения). Никакой лишней воды и общих фраз — только сухая выжимка, функции и конструкции, которые прямо сейчас помогут разработчику в диалоге. Пиши в формате Markdown.`
@@ -38,11 +38,10 @@ const MAX_CONTEXT_CHARS = 12000
 // ─── Состояние ───────────────────────────────────────────────────────
 
 let isStreaming = false
-let streamAbortController: AbortController | null = null
-let getWindow: (() => BrowserWindow | null) | null = null
+let currentRequest: Electron.ClientRequest | null = null
 
-// История предыдущих подсказок для контекста (последние 3)
-let suggestionHistory: Array<{ role: 'assistant'; content: string }> = []
+// История предыдущих подсказок для контекста (user + assistant пары)
+let suggestionHistory: Array<{ role: 'user' | 'assistant'; content: string }> = []
 
 // Таймер для автоматической отправки при паузе в разговоре
 let autoSendTimer: ReturnType<typeof setTimeout> | null = null
@@ -73,12 +72,17 @@ function broadcastSuggestion(payload: SuggestionUpdatePayload): void {
 // ─── Основная функция стриминга ──────────────────────────────────────
 
 /**
- * Отправляет запрос на OpenRouter API с потоковой генерацией.
- * Читает ReadableStream через .getReader() и по мере прихода токенов
- * транслирует их в оверлей через IPC.
+ * Отправляет запрос на OpenRouter API через Electron net.request
+ * с потоковой генерацией (SSE).
  *
- * SSE работает через стандартный Node.js fetch (undici ProxyAgent),
- * НЕ через net.fetch — глобальный хак ломал ReadableStream.
+ * net.request использует Chromium network stack, что обеспечивает:
+ *   - Автоматическую маршрутизацию через прокси (session.setProxy)
+ *   - Поддержку прокси-авторизации (session.on('login'))
+ *   - Надёжный SSE-стриминг через response.on('data')
+ *
+ * Предыдущий подход (Node.js fetch через undici ProxyAgent):
+ *   - Игнорировал настройки прокси Electron сессии
+ *   - Мог терять данные при SSE-стриминге через прокси-туннель
  */
 export async function streamSuggestion(
   customTranscript?: string
@@ -109,12 +113,11 @@ export async function streamSuggestion(
 
   const contextText = trimContext(transcript)
 
-  console.log(`[openrouter] Отправка запроса: модель=${model}, контекст=${contextText.length} символов`)
+  console.log(`[openrouter] Отправка запроса через net.request: модель=${model}, контекст=${contextText.length} символов`)
 
   isStreaming = true
-  streamAbortController = new AbortController()
 
-  // Формируем сообщения для API
+  // Формируем сообщения для API (user/assistant пары для правильного формата chat)
   const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
     { role: 'system', content: SYSTEM_PROMPT }
   ]
@@ -130,58 +133,47 @@ export async function streamSuggestion(
     content: `Вот живой текст текущего созвона:\n\n${contextText}\n\nДай краткую техническую подсказку по 1С, которая прямо сейчас поможет разработчику.`
   })
 
-  try {
-    // Стандартный Node.js fetch через undici ProxyAgent (НЕ net.fetch!)
-    // net.fetch ломал SSE-стриминг: ReadableStream.getReader() не работал
-    const response = await fetchWithFallback(OPENROUTER_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://1c-copilot.app',
-        'X-Title': '1C-Copilot'
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-        max_tokens: 1024,
-        temperature: 0.4
-      }),
-      signal: streamAbortController.signal
-    })
+  // ─── Создаём net.request ───
+  const request = net.request({
+    method: 'POST',
+    url: OPENROUTER_URL
+  })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error(`[openrouter] API error ${response.status}:`, errorText)
-      broadcastSuggestion({
-        content: `❌ Ошибка OpenRouter (${response.status}): ${errorText.slice(0, 200)}`,
-        streaming: false
+  request.setHeader('Content-Type', 'application/json')
+  request.setHeader('Authorization', `Bearer ${apiKey}`)
+  request.setHeader('HTTP-Referer', 'https://1c-copilot.app')
+  request.setHeader('X-Title', '1C-Copilot')
+
+  currentRequest = request
+
+  let fullContent = ''
+  let buffer = ''
+
+  // ─── Обработка ответа ───
+  request.on('response', (response) => {
+    const statusCode = response.statusCode
+
+    // Ошибка API — собираем тело ошибки
+    if (statusCode !== 200) {
+      let errorBody = ''
+      response.on('data', (chunk: Buffer) => {
+        errorBody += chunk.toString()
       })
-      isStreaming = false
+      response.on('end', () => {
+        console.error(`[openrouter] API error ${statusCode}:`, errorBody)
+        broadcastSuggestion({
+          content: `❌ Ошибка OpenRouter (${statusCode}): ${errorBody.slice(0, 200)}`,
+          streaming: false
+        })
+        isStreaming = false
+        currentRequest = null
+      })
       return
     }
 
-    const reader = response.body?.getReader()
-    if (!reader) {
-      console.error('[openrouter] Нет response body — SSE стрим не доступен')
-      isStreaming = false
-      return
-    }
-
-    const decoder = new TextDecoder()
-    let fullContent = ''
-    let buffer = ''
-
-    // НЕ отправляем пустой статус стриминга — это показывает
-    // пустой "stream" бейдж и "Продолжение следует".
-    // Сначала дождёмся первого токена, потом обновим UI.
-
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
+    // ─── SSE-стриминг: разбираем data-строки ───
+    response.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString()
       const lines = buffer.split('\n')
       buffer = lines.pop() || '' // Последняя неполная строка остаётся в буфере
 
@@ -203,51 +195,97 @@ export async function streamSuggestion(
             })
           }
         } catch {
-          // Некорректный JSON — пропускаем
+          // Некорректный JSON — пропускаем (неполный чанк)
         }
       }
-    }
-
-    // Финальная отправка
-    broadcastSuggestion({
-      content: fullContent,
-      streaming: false
     })
 
-    // Сохраняем в историю для контекста следующих запросов
-    if (fullContent) {
-      suggestionHistory.push({ role: 'assistant', content: fullContent })
-      // Оставляем только последние 3 подсказки
-      if (suggestionHistory.length > 3) {
-        suggestionHistory = suggestionHistory.slice(-3)
+    // ─── Конец стрима ───
+    response.on('end', () => {
+      // Обрабатываем оставшийся буфер
+      if (buffer.trim()) {
+        const trimmed = buffer.trim()
+        if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+          try {
+            const parsed = JSON.parse(trimmed.slice(6))
+            const token = parsed.choices?.[0]?.delta?.content
+            if (token) {
+              fullContent += token
+            }
+          } catch { /* skip */ }
+        }
       }
-      console.log(`[openrouter] Подсказка сгенерирована (${fullContent.length} символов)`)
-    } else {
-      console.warn('[openrouter] LLM вернул пустой ответ')
-    }
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') {
+
+      // Финальная отправка
+      broadcastSuggestion({
+        content: fullContent,
+        streaming: false
+      })
+
+      // Сохраняем в историю для контекста следующих запросов (user + assistant пары)
+      if (fullContent) {
+        // Сохраним краткий контекст user-запроса (последние 500 символов)
+        suggestionHistory.push({ role: 'user', content: contextText.slice(-500) })
+        suggestionHistory.push({ role: 'assistant', content: fullContent })
+        // Оставляем только последние 3 пары (6 записей)
+        if (suggestionHistory.length > 6) {
+          suggestionHistory = suggestionHistory.slice(-6)
+        }
+        console.log(`[openrouter] Подсказка сгенерирована (${fullContent.length} символов)`)
+      } else {
+        console.warn('[openrouter] LLM вернул пустой ответ')
+      }
+
+      isStreaming = false
+      currentRequest = null
+    })
+
+    // ─── Ошибка чтения ответа ───
+    response.on('error', (err: Error) => {
+      console.error('[openrouter] Ошибка чтения ответа:', err.message)
+      broadcastSuggestion({
+        content: `❌ Ошибка чтения ответа: ${err.message}`,
+        streaming: false
+      })
+      isStreaming = false
+      currentRequest = null
+    })
+  })
+
+  // ─── Ошибка запроса ───
+  request.on('error', (err: Error) => {
+    if (err.message.includes('aborted') || err.message.includes('ABORTED')) {
       console.log('[openrouter] Запрос прерван пользователем')
     } else {
-      console.error('[openrouter] Ошибка стриминга:', (err as Error).message)
+      console.error('[openrouter] Ошибка запроса через net.request:', err.message)
       broadcastSuggestion({
-        content: `❌ Ошибка: ${(err as Error).message}`,
+        content: `❌ Ошибка: ${err.message}`,
         streaming: false
       })
     }
-  } finally {
     isStreaming = false
-    streamAbortController = null
-  }
+    currentRequest = null
+  })
+
+  // ─── Отправка тела запроса ───
+  request.write(JSON.stringify({
+    model,
+    messages,
+    stream: true,
+    max_tokens: 1024,
+    temperature: 0.4
+  }))
+
+  request.end()
 }
 
 /**
  * Прервать текущий стриминг.
  */
 export function abortStream(): void {
-  if (streamAbortController) {
-    streamAbortController.abort()
-    streamAbortController = null
+  if (currentRequest) {
+    currentRequest.abort()
+    currentRequest = null
   }
   isStreaming = false
   broadcastSuggestion({ content: '', streaming: false })
@@ -283,9 +321,8 @@ export function manualSuggestion(): void {
 
 // ─── Инициализация ───────────────────────────────────────────────────
 
-export function initOpenRouterService(getWindowFn: () => BrowserWindow | null): void {
-  getWindow = getWindowFn
-  console.log('[openrouter] Инициализирован')
+export function initOpenRouterService(_getWindowFn?: () => BrowserWindow | null): void {
+  console.log('[openrouter] Инициализирован (net.request + Electron session proxy)')
 }
 
 export function isStreamingActive(): boolean {

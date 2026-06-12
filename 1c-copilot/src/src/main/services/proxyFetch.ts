@@ -1,19 +1,28 @@
 /**
- * proxyFetch.ts — Прокси-обёртка над fetch с fallback на прямое соединение
+ * proxyFetch.ts — Двойная прокси-обёртка: undici + Electron session
  *
  * Архитектура:
- *   1. По умолчанию: undici ProxyAgent (Node.js native fetch через HTTP прокси)
- *   2. Если прокси недоступен (ERR_TUNNEL, timeout) — автоматически переключаемся
- *      на прямое соединение (Agent без прокси)
+ *   1. Node.js fetch (sttService): undici ProxyAgent — credentials встроены
+ *      в CONNECT-запрос, работает надёжно для multipart/form-data
+ *   2. Electron net.request (openrouterService): session.setProxy +
+ *      session.on('login') — автоматическая маршрутизация через прокси
+ *      с поддержкой авторизации и SSE-стриминга
+ *   3. Если прокси недоступен (ERR_TUNNEL, timeout) — автоматически
+ *      переключаемся на прямое соединение
  *
- * Почему НЕ Chromium net.fetch:
- *   Electron bug #44249 — net.fetch НЕ триггерит session.on('login')
- *   для прокси-авторизации. Warmup BrowserWindow тоже не помог.
- *   Туннель падает с ERR_TUNNEL_CONNECTION_FAILED ДО этапа авторизации.
- *   undici ProxyAgent встраивает credentials прямо в CONNECT-запрос.
+ * Почему sttService НЕ использует net.request:
+ *   net.request не поддерживает отправку Buffer/Uint8Array body
+ *   для multipart/form-data — только строковый JSON.
+ *   Whisper API требует multipart с бинарным WAV-файлом.
+ *
+ * Почему openrouterService НЕ использует Node.js fetch:
+ *   SSE-стриминг через undici ProxyAgent может терять данные
+ *   при прокси-туннелировании. net.request использует Chromium stack,
+ *   который лучше справляется с long-lived streaming connections.
  */
 
 import { ProxyAgent, Agent, setGlobalDispatcher } from 'undici'
+import { session } from 'electron'
 
 // ─── Конфигурация прокси ──────────────────────────────────────────
 
@@ -91,8 +100,45 @@ export async function testProxy(): Promise<boolean> {
 }
 
 /**
+ * Настройка Electron session proxy для net.request.
+ * Вызывать ПОСЛЕ app.whenReady() — session доступна только после инициализации.
+ *
+ * Настраивает:
+ *   - session.defaultSession.setProxy() — маршрутизация через прокси
+ *   - session.defaultSession.on('login') — автоматическая авторизация
+ *
+ * Это позволяет net.request (из openrouterService) автоматически
+ * идти через прокси с авторизацией, как обычный BrowserWindow.
+ */
+export function initSessionProxy(): void {
+  try {
+    session.defaultSession.setProxy({
+      proxyRules: `${PROXY_HOST}:${PROXY_PORT}`,
+      proxyBypassRules: '<-loopback>, localhost, 127.0.0.1'
+    })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ;(session.defaultSession as any).on(
+      'login',
+      (event: any, _webContents: any, _details: any, authInfo: any, callback: any) => {
+        console.log(
+          `[proxy] session.on('login') — isProxy: ${authInfo?.isProxy}, host: ${authInfo?.host || 'unknown'}`
+        )
+        event.preventDefault()
+        callback(PROXY_USER, PROXY_PASS)
+      }
+    )
+
+    console.log(`[proxy] Electron session proxy настроен для net.request: ${PROXY_HOST}:${PROXY_PORT}`)
+  } catch (err) {
+    console.warn('[proxy] Не удалось настроить Electron session proxy:', (err as Error).message)
+  }
+}
+
+/**
  * fetch с автоматическим fallback: сначала через прокси, если упал — напрямую.
- * Использовать вместо raw fetch() в sttService и openrouterService.
+ * Использовать вместо raw fetch() в sttService (для multipart/form-data).
+ * НЕ использовать для SSE-стриминга — для этого net.request.
  */
 export async function fetchWithFallback(
   url: string,

@@ -2,21 +2,21 @@ import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { createMainWindows, registerIpcHandlers, cleanup } from './ipc/handlers'
 
-// ─── ПРОКСИ через Node.js (undici), а не через Chromium ───
-// Chromium net.fetch НЕ поддерживает прокси-авторизацию (Electron bug #44249):
-//   session.on('login') не триггерится для net.fetch,
-//   прогрев через BrowserWindow тоже не помогает — туннель падает
-//   с ERR_TUNNEL_CONNECTION_FAILED до этапа авторизации.
-// Решение: undici ProxyAgent + setGlobalDispatcher — Node.js native fetch
-// идёт через прокси, авторизация встроена в URL.
-// Если прокси недоступен — автоматически fallback на прямое соединение.
-import { initProxy, testProxy, isProxyEnabled } from './services/proxyFetch'
+// ─── ДВОЙНАЯ ПРОКСИ-АРХИТЕКТУРА ───
+// 1. undici ProxyAgent: для Node.js fetch (sttService → Groq Whisper)
+//    Credentials встроены в CONNECT-запрос, работает с multipart/form-data
+// 2. Electron session proxy: для net.request (openrouterService → OpenRouter SSE)
+//    session.setProxy + session.on('login') — автоматическая авторизация
+// Node.js fetch игнорирует настройки прокси Electron сессии,
+// поэтому нужны оба подхода.
+import { initProxy, initSessionProxy, testProxy, isProxyEnabled } from './services/proxyFetch'
 
-// Устанавливаем ProxyAgent как глобальный диспетчер
+// Устанавливаем undici ProxyAgent как глобальный диспетчер для Node.js fetch
 initProxy()
 
 // ВАЖНО: НЕ переопределяем globalThis.fetch на net.fetch!
-// Node.js native fetch (undici-based) теперь идёт через прокси автоматически.
+// Node.js native fetch (undici-based) идёт через прокси автоматически.
+// net.request (Electron Chromium stack) использует session proxy.
 
 const gotLock = app.requestSingleInstanceLock()
 
@@ -39,7 +39,12 @@ if (!gotLock) {
   })
 
   app.whenReady().then(async () => {
-    // ─── Диагностика прокси (ЗАДАЧА 1) ───
+    // ─── Настройка Electron session proxy для net.request ───
+    // Настраиваем session.setProxy + session.on('login') для openrouterService.
+    // Должно быть вызвано ПОСЛЕ app.whenReady(), когда session доступна.
+    initSessionProxy()
+
+    // ─── Диагностика прокси (undici ProxyAgent) ───
     // Проверяем что прокси реально работает ДО создания окон.
     // Если прокси недоступен — автоматически переключимся на direct.
     const proxyOk = await testProxy()

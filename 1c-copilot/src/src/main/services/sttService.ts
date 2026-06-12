@@ -6,9 +6,13 @@
  * получает текст и транслирует его в renderer через IPC.
  *
  * Ключевые оптимизации:
- *   - Silence Gate: чанки с амплитудой < 400/32768 отклоняются ДО отправки
- *     (предотвращает галлюцинации Whisper типа «Продолжение следует...»
+ *   - Silence Gate: чанки с амплитудой < 1200/32768 отклоняются ДО отправки
+ *     (отсекает аппаратные наводки и шум звуковой карты,
+ *     предотвращает галлюцинации Whisper типа «Продолжение следует...»
  *     и экономит rate limit Groq)
+ *   - Hallucination Filter: пост-фильтр текста ПОСЛЕ Whisper —
+ *     отбрасывает типичные галлюцинации («Продолжение следует»,
+ *     «Субтитры созданы сообществом» и пр.)
  *   - Rate limiting: 3с пауза между запросами + retry при 429
  *   - fetch через undici ProxyAgent (НЕ net.fetch — баг Electron #44249)
  */
@@ -30,8 +34,9 @@ const WHISPER_MODEL_OPENAI = 'whisper-1'
 const MIN_CHUNK_SIZE_BYTES = 32000 // ~1 сек при 16kHz 16-bit mono
 
 // Silence Gate: порог амплитуды PCM Int16 (0-32768)
-// Значение ниже → цифр тишина → не отправляем на API
-const SILENCE_THRESHOLD = 400 // ~1.2% от полной шкалы
+// Значение ниже → цифр тишина / аппаратный шум → не отправляем на API
+// Увеличен с 400 до 1200 для отсечения наводок звуковой карты
+const SILENCE_THRESHOLD = 1200 // ~3.7% от полной шкалы
 
 // Rate limit: пауза между последовательными запросами (мс)
 const REQUEST_DELAY_MS = 3000 // 3с → max 20 RPM (лимит Groq free)
@@ -39,6 +44,17 @@ const REQUEST_DELAY_MS = 3000 // 3с → max 20 RPM (лимит Groq free)
 // Retry при 429
 const MAX_RETRIES = 2
 const RETRY_DELAY_MS = 4000 // 4с — Groq пишет "try again in 3s"
+
+// Hallucination Filter: типичные галлюцинации Whisper на тишине/шуме
+const HALLUCINATIONS = [
+  'продолжение следует',
+  'субтитры созданы сообществом',
+  'спасибо за просмотр',
+  'было бы неплохо',
+  'конец фильма',
+  'просмотр',
+  'читайте на сайте'
+]
 
 // ─── Типы ────────────────────────────────────────────────────────────
 
@@ -245,8 +261,20 @@ async function transcribeChunk(
         return null // Тишина или неразборчиво
       }
 
+      // ─── Hallucination Filter: отбрасываем галлюцинации Whisper ───
+      const recognizedText = result.text.trim()
+      const cleanText = recognizedText.toLowerCase()
+      const isHallucination =
+        HALLUCINATIONS.some(phrase => cleanText.includes(phrase)) ||
+        cleanText.length < 2
+
+      if (isHallucination) {
+        console.log(`[sttService] Текст отклонён фильтром галлюцинаций: "${recognizedText}"`)
+        return null // Прерываем передачу мусора в UI и LLM
+      }
+
       return {
-        text: result.text.trim(),
+        text: recognizedText,
         source
       }
     } catch (err) {
@@ -335,7 +363,7 @@ function broadcastTranscription(payload: TranscriptionUpdatePayload): void {
 
 export function initSttService(getWindowFn: () => BrowserWindow | null): void {
   getWindow = getWindowFn
-  console.log('[sttService] Инициализирован (Silence Gate: порог < 400/32768)')
+  console.log('[sttService] Инициализирован (Silence Gate: порог < 1200/32768, Hallucination Filter: ON)')
 }
 
 export function enqueueChunk(
