@@ -37,6 +37,11 @@ function baseOverlayOptions(
   // -webkit-app-region: drag и клики по кнопкам не работают
   const isToolbar = kind === 'toolbar'
 
+  // Для DEBAG: suggestion/transcript — тёмный непрозрачный фон + рамка,
+  // чтобы окна были ВИДНЫ сразу после запуска.
+  // После отладки вернуть transparent: true + backgroundColor: '#00000000'
+  const isDebugPanel = !isToolbar
+
   return {
     width: size.width,
     height: size.height,
@@ -45,7 +50,7 @@ function baseOverlayOptions(
     maxWidth: 2000,
     maxHeight: 800,
     x: Math.round(screenW / 2 - size.width / 2),
-    y: 48,
+    y: isToolbar ? 48 : 120,
     show: false,
     resizable: true,
     minimizable: false,
@@ -54,10 +59,10 @@ function baseOverlayOptions(
     skipTaskbar: true,
     alwaysOnTop: true,
     focusable: isToolbar,
-    frame: false,
-    transparent: true,
-    hasShadow: false,
-    backgroundColor: '#00000000',
+    frame: isDebugPanel,       // suggestion/transcript: видимая рамка для дебага
+    transparent: !isDebugPanel, // suggestion/transcript: НЕ прозрачные
+    hasShadow: isDebugPanel,
+    backgroundColor: isDebugPanel ? '#14141e' : '#00000000',
     titleBarStyle: 'hidden',
     autoHideMenuBar: true,
     ...(process.platform === 'darwin' ? { type: 'panel' as const } : {}),

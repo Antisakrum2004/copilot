@@ -12,7 +12,13 @@ export const IPC = {
     loopbackStopped: 'audio-loopback-stopped',
     loopbackError: 'audio-loopback-error',
     enableLoopback: 'enable-loopback-audio',
-    disableLoopback: 'disable-loopback-audio'
+    disableLoopback: 'disable-loopback-audio',
+    /** Main → Renderer: начать захват микрофона через getUserMedia */
+    micCaptureStart: 'audio:micCaptureStart',
+    /** Main → Renderer: остановить захват микрофона */
+    micCaptureStop: 'audio:micCaptureStop',
+    /** Renderer → Main: PCM-чанк с микрофона (16kHz, mono, 16-bit) */
+    sendMicChunk: 'audio:sendMicChunk'
   },
   transcription: {
     update: 'transcription-update',

@@ -33,6 +33,12 @@ export type CopilotApi = {
     onLoopbackStarted: (cb: () => void) => () => void
     onLoopbackStopped: (cb: () => void) => () => void
     onLoopbackError: (cb: (message: string) => void) => () => void
+    /** Main → Renderer: начать getUserMedia захвата микрофона */
+    onMicCaptureStart: (cb: () => void) => () => void
+    /** Main → Renderer: остановить getUserMedia захвата микрофона */
+    onMicCaptureStop: (cb: () => void) => () => void
+    /** Renderer → Main: отправить PCM-чанк микрофона */
+    sendMicChunk: (data: ArrayBuffer) => void
   }
   transcription: {
     openWindow: () => Promise<void>
@@ -95,7 +101,10 @@ const api: CopilotApi = {
     onSpeakerChunk: (cb) => subscribe(IPC.audio.speakerChunk, cb),
     onLoopbackStarted: (cb) => subscribe(IPC.audio.loopbackStarted, cb),
     onLoopbackStopped: (cb) => subscribe(IPC.audio.loopbackStopped, cb),
-    onLoopbackError: (cb) => subscribe(IPC.audio.loopbackError, cb)
+    onLoopbackError: (cb) => subscribe(IPC.audio.loopbackError, cb),
+    onMicCaptureStart: (cb) => subscribe(IPC.audio.micCaptureStart, cb),
+    onMicCaptureStop: (cb) => subscribe(IPC.audio.micCaptureStop, cb),
+    sendMicChunk: (data) => ipcRenderer.send(IPC.audio.sendMicChunk, data)
   },
   transcription: {
     openWindow: () => ipcRenderer.invoke(IPC.transcription.openWindow),

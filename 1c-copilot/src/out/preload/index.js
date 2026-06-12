@@ -12,7 +12,13 @@ const IPC = {
     loopbackStopped: "audio-loopback-stopped",
     loopbackError: "audio-loopback-error",
     enableLoopback: "enable-loopback-audio",
-    disableLoopback: "disable-loopback-audio"
+    disableLoopback: "disable-loopback-audio",
+    /** Main → Renderer: начать захват микрофона через getUserMedia */
+    micCaptureStart: "audio:micCaptureStart",
+    /** Main → Renderer: остановить захват микрофона */
+    micCaptureStop: "audio:micCaptureStop",
+    /** Renderer → Main: PCM-чанк с микрофона (16kHz, mono, 16-bit) */
+    sendMicChunk: "audio:sendMicChunk"
   },
   transcription: {
     update: "transcription-update",
@@ -81,7 +87,10 @@ const api = {
     onSpeakerChunk: (cb) => subscribe(IPC.audio.speakerChunk, cb),
     onLoopbackStarted: (cb) => subscribe(IPC.audio.loopbackStarted, cb),
     onLoopbackStopped: (cb) => subscribe(IPC.audio.loopbackStopped, cb),
-    onLoopbackError: (cb) => subscribe(IPC.audio.loopbackError, cb)
+    onLoopbackError: (cb) => subscribe(IPC.audio.loopbackError, cb),
+    onMicCaptureStart: (cb) => subscribe(IPC.audio.micCaptureStart, cb),
+    onMicCaptureStop: (cb) => subscribe(IPC.audio.micCaptureStop, cb),
+    sendMicChunk: (data) => electron.ipcRenderer.send(IPC.audio.sendMicChunk, data)
   },
   transcription: {
     openWindow: () => electron.ipcRenderer.invoke(IPC.transcription.openWindow),

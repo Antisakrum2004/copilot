@@ -1,15 +1,20 @@
 /**
  * audioCapture.ts — Сервис аудио-захвата для 1C-Copilot
  *
- * Захватывает два потока аудио:
- *   1. Системный звук (WASAPI loopback) — слышим собеседника
- *   2. Микрофон разработчика
+ * АРХИТЕКТУРА (v2):
  *
- * Нарезает поток на чанки по 5-7 секунд в формате:
- *   16 kHz, Mono, 16-bit PCM (Linear PCM, little-endian)
+ * Микрофон — захватывается в Renderer-процессе через
+ * navigator.mediaDevices.getUserMedia(). Renderer создаёт
+ * AudioContext на 16kHz, 1 канал, получает Float32 через
+ * ScriptProcessorNode, конвертирует в Int16 PCM и шлёт
+ * чанки через IPC (audio:sendMicChunk). Main-процесс
+ * принимает чанки и кормит их в ChunkBuffer → pipeline.
  *
- * Чанки отправляются через callback для дальнейшей
- * передачи в STT-сервис.
+ * Системный звук — захватывается в Main-процессе через
+ * WASAPI loopback (win-audio-capture) или ffmpeg fallback.
+ * Все ошибки обёрнуты в try/catch, чтобы не ронять процесс.
+ *
+ * Чанки нарезаются по 6 секунд: 16kHz, Mono, 16-bit PCM.
  */
 
 import { BrowserWindow } from 'electron'
@@ -21,9 +26,9 @@ import type { ChildProcess } from 'child_process'
 const SAMPLE_RATE = 16000
 const CHANNELS = 1
 const BITS_PER_SAMPLE = 16
-const CHUNK_DURATION_MS = 6000 // 6 секунд — оптимально для Whisper API
-const CHUNK_SIZE_SAMPLES = (SAMPLE_RATE * CHUNK_DURATION_MS) / 1000 // 96 000 сэмплов
-const CHUNK_SIZE_BYTES = CHUNK_SIZE_SAMPLES * (BITS_PER_SAMPLE / 8) // 192 000 байт
+const CHUNK_DURATION_MS = 6000
+const CHUNK_SIZE_SAMPLES = (SAMPLE_RATE * CHUNK_DURATION_MS) / 1000
+const CHUNK_SIZE_BYTES = CHUNK_SIZE_SAMPLES * (BITS_PER_SAMPLE / 8) // 192 000
 
 // ─── Типы ────────────────────────────────────────────────────────────
 
@@ -46,66 +51,11 @@ export type AudioCaptureState = {
 let captureState: AudioCaptureState = { mic: false, system: false }
 let chunkCallback: AudioChunkCallback | null = null
 
-// Нативный модуль WASAPI loopback (Windows-only)
-let nativeLoopback: {
-  start: (cb: (buffer: Buffer) => void) => void
-  stop: () => void
-} | null = null
-
-// ffmpeg child processes — на уровне модуля для управления жизненным циклом
-let ffmpegMicProcess: ChildProcess | null = null
+// ffmpeg child process для системного звука
 let ffmpegSystemProcess: ChildProcess | null = null
-
-// ─── Инициализация нативного модуля ──────────────────────────────────
-
-function loadNativeLoopback(): void {
-  if (process.platform !== 'win32') {
-    console.warn('[audioCapture] WASAPI loopback доступен только на Windows')
-    return
-  }
-  // Если уже загружен — не повторяем
-  if (nativeLoopback) {
-    console.log('[audioCapture] WASAPI loopback уже загружен')
-    return
-  }
-
-  try {
-    // Пытаемся загрузить win-audio-capture (нативный модуль)
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const mod = require('win-audio-capture')
-    nativeLoopback = {
-      start: (cb: (buffer: Buffer) => void) => {
-        mod.startCapture((buffer: Buffer) => {
-          cb(buffer)
-        })
-      },
-      stop: () => {
-        mod.stopCapture()
-      }
-    }
-    console.log('[audioCapture] ✅ Нативный WASAPI loopback загружен успешно')
-  } catch (err) {
-    const error = err as Error
-    console.error('[audioCapture] ❌ КРИТИЧЕСКАЯ ОШИБКА НАТИВНОГО АУДИО:')
-    console.error('[audioCapture]    message:', error.message)
-    console.error('[audioCapture]    name:', error.name)
-    console.error('[audioCapture]    stack:', error.stack?.split('\n').slice(0, 3).join('\n'))
-    console.warn('[audioCapture] → Переключаемся на ffmpeg fallback')
-    nativeLoopback = null
-  }
-}
 
 // ─── Резэмплирование и конвертация ──────────────────────────────────
 
-/**
- * Конвертирует аудио-буфер в формат 16kHz Mono 16-bit PCM.
- * Принимает входной буфер в любом формате и преобразует его.
- *
- * @param inputBuffer - Входной аудио-буфер (PCM, любой sample rate)
- * @param inputSampleRate - Частота дискретизации входного буфера
- * @param inputChannels - Количество каналов входного буфера
- * @returns Buffer в формате 16kHz Mono 16-bit PCM
- */
 function convertToTargetFormat(
   inputBuffer: Buffer,
   inputSampleRate: number,
@@ -113,15 +63,13 @@ function convertToTargetFormat(
 ): Buffer {
   const inputSamples = inputBuffer.length / (BITS_PER_SAMPLE / 8) / inputChannels
   const outputSamples = Math.round((inputSamples * SAMPLE_RATE) / inputSampleRate)
-  const output = Buffer.alloc(outputSamples * 2) // 16-bit = 2 байта на сэмпл
+  const output = Buffer.alloc(outputSamples * 2)
 
   for (let i = 0; i < outputSamples; i++) {
-    // Линейная интерполяция для резэмплирования
     const srcIndex = (i * inputSampleRate) / SAMPLE_RATE
     const srcIndexFloor = Math.floor(srcIndex)
     const frac = srcIndex - srcIndexFloor
 
-    // Миксуем каналы в моно (берём среднее)
     let monoSample: number
     if (inputChannels === 1) {
       const offset = srcIndexFloor * 2
@@ -139,7 +87,6 @@ function convertToTargetFormat(
       monoSample = Math.round(sum / inputChannels)
     }
 
-    // Интерполяция между соседними сэмплами
     if (srcIndexFloor + 1 < inputSamples && frac > 0) {
       let nextMonoSample: number
       if (inputChannels === 1) {
@@ -160,7 +107,6 @@ function convertToTargetFormat(
       monoSample = Math.round(monoSample * (1 - frac) + nextMonoSample * frac)
     }
 
-    // Clamp to 16-bit range
     monoSample = Math.max(-32768, Math.min(32767, monoSample))
     output.writeInt16LE(monoSample, i * 2)
   }
@@ -170,10 +116,6 @@ function convertToTargetFormat(
 
 // ─── Буферизация чанков ──────────────────────────────────────────────
 
-/**
- * Накапливает аудио-данные и вызывает callback
- * когда накоплен чанк нужного размера (CHUNK_DURATION_MS).
- */
 class ChunkBuffer {
   private buffer = Buffer.alloc(0)
   private source: AudioSource
@@ -186,16 +128,13 @@ class ChunkBuffer {
     this.inputChannels = inputChannels
   }
 
-  /** Добавить аудио-данные в буфер */
   push(data: Buffer): void {
     this.buffer = Buffer.concat([this.buffer, data])
 
-    // Проверяем, накоплен ли чанк нужного размера
     while (this.buffer.length >= CHUNK_SIZE_BYTES) {
       const chunk = this.buffer.subarray(0, CHUNK_SIZE_BYTES)
       this.buffer = this.buffer.subarray(CHUNK_SIZE_BYTES)
 
-      // Конвертируем в целевой формат
       const converted = convertToTargetFormat(chunk, this.inputSampleRate, this.inputChannels)
 
       if (chunkCallback) {
@@ -204,12 +143,10 @@ class ChunkBuffer {
     }
   }
 
-  /** Сбросить буфер */
   reset(): void {
     this.buffer = Buffer.alloc(0)
   }
 
-  /** Оставшиеся данные (flush) */
   flush(): void {
     if (this.buffer.length > 0 && chunkCallback) {
       const converted = convertToTargetFormat(
@@ -223,29 +160,162 @@ class ChunkBuffer {
   }
 }
 
-// ─── Fallback-захват через ffmpeg ────────────────────────────────────
+// ─── Буферы ──────────────────────────────────────────────────────────
+
+let systemChunkBuf: ChunkBuffer | null = null
+let micChunkBuf: ChunkBuffer | null = null
+
+// ─── WASAPI loopback (системный звук, Windows-only) ──────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let nativeCaptureInstance: any = null
+let nativeLoadFailed = false
+let nativeCaptureActive = false
 
 /**
- * Fallback-режим захвата аудио через child_process + ffmpeg.
- * Работает на любой платформе где установлен ffmpeg.
- *
- * Ссылка на процесс сохраняется на уровне модуля
- * (ffmpegMicProcess / ffmpegSystemProcess) для корректного
- * завершения через stopCapture().
- *
- * @returns true если процесс ffmpeg успешно запущен, false если нет
+ * Загружает win-audio-capture — JavaScript-обёртку над ffmpeg.
+ * Экспортирует КЛАСС WinAudioCapture.
  */
-function startFallbackCapture(
-  source: AudioSource,
-  chunkBuf: ChunkBuffer
-): boolean {
+function loadNativeLoopback(): void {
+  if (process.platform !== 'win32') {
+    console.warn('[audioCapture] WASAPI loopback доступен только на Windows')
+    return
+  }
+  if (nativeLoadFailed || nativeCaptureInstance) return
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('win-audio-capture')
+    const WinAudioCapture = mod.WinAudioCapture || mod.default
+    if (!WinAudioCapture || typeof WinAudioCapture !== 'function') {
+      console.error('[audioCapture] WinAudioCapture класс НЕ найден в экспорте')
+      nativeLoadFailed = true
+      return
+    }
+    nativeCaptureInstance = new WinAudioCapture()
+
+    const requiredMethods = ['getDevices', 'startCapture', 'stopCapture', 'getRecommendedDevice']
+    for (const method of requiredMethods) {
+      if (typeof nativeCaptureInstance[method] !== 'function') {
+        console.error(`[audioCapture] WinAudioCapture.${method} — НЕ функция`)
+        nativeLoadFailed = true
+        nativeCaptureInstance = null
+        return
+      }
+    }
+    console.log('[audioCapture] ✅ WinAudioCapture загружен')
+  } catch (err) {
+    console.error('[audioCapture] ❌ Ошибка загрузки win-audio-capture:', (err as Error).message)
+    nativeLoadFailed = true
+    nativeCaptureInstance = null
+  }
+}
+
+/**
+ * Запускает захват системного звука через WinAudioCapture.
+ * Обёрнуто в try/catch — ошибки НЕ роняют процесс.
+ */
+async function startNativeLoopbackCapture(): Promise<boolean> {
+  if (!nativeCaptureInstance) return false
+  if (nativeCaptureActive) {
+    console.warn('[audioCapture] Loopback уже запущен')
+    return true
+  }
+
+  try {
+    const devices = await nativeCaptureInstance.getDevices()
+    let selectedDevice = nativeCaptureInstance.getRecommendedDevice(devices)
+
+    if (!selectedDevice) {
+      const stereoMix = devices.find((d: { deviceType?: string; name?: string }) =>
+        d.deviceType === 'stereo_mix' ||
+        (d.name && d.name.toLowerCase().includes('stereo mix'))
+      )
+      if (stereoMix) {
+        selectedDevice = stereoMix
+      } else if (devices.length > 0) {
+        console.warn('[audioCapture] Stereo Mix не найден, пробуем первое устройство:', devices[0].name)
+        selectedDevice = devices[0]
+      }
+    }
+
+    if (!selectedDevice) {
+      console.error('[audioCapture] ❌ Нет аудио-устройств для системного захвата')
+      nativeLoadFailed = true
+      return false
+    }
+
+    console.log(`[audioCapture] Выбрано устройство: "${selectedDevice.name}"`)
+    systemChunkBuf = new ChunkBuffer('system', 44100, 2)
+    let wavHeaderSkipped = false
+
+    await nativeCaptureInstance.startCapture({
+      device: selectedDevice.name,
+      sampleRate: 44100,
+      channels: 2,
+      bitDepth: 16,
+      onData: (chunk: Buffer) => {
+        if (!chunk || chunk.length === 0) return
+        let data = chunk
+        if (!wavHeaderSkipped) {
+          if (chunk.length > 44) {
+            data = chunk.subarray(44)
+            wavHeaderSkipped = true
+          } else {
+            return
+          }
+        }
+        systemChunkBuf?.push(data)
+      }
+    })
+
+    nativeCaptureActive = true
+    console.log(`[audioCapture] ✅ Системный звук: WinAudioCapture запущен`)
+    return true
+  } catch (err) {
+    const error = err as Error
+    console.error('[audioCapture] ❌ WinAudioCapture.startCapture():', error.message)
+
+    // Если "already running" — захват УЖЕ работает, это не сбой
+    if (error.message && error.message.toLowerCase().includes('already running')) {
+      console.log('[audioCapture] ✅ Захват уже запущен (already running)')
+      nativeCaptureActive = true
+      return true
+    }
+
+    nativeLoadFailed = true
+    nativeCaptureActive = false
+    console.warn('[audioCapture] → Переключаемся на ffmpeg fallback')
+    return false
+  }
+}
+
+function stopNativeLoopbackCapture(): void {
+  try {
+    if (nativeCaptureInstance && nativeCaptureActive) {
+      void nativeCaptureInstance.stopCapture()
+    }
+  } catch (err) {
+    console.warn('[audioCapture] Ошибка stopCapture():', (err as Error).message)
+  }
+  nativeCaptureActive = false
+  systemChunkBuf?.flush()
+  systemChunkBuf = null
+}
+
+// ─── FFmpeg fallback (только системный звук!) ────────────────────────
+
+/**
+ * Запускает ffmpeg для захвата системного звука.
+ * Обёрнуто в try/catch — ошибки НЕ роняют процесс.
+ */
+function startFfmpegSystemCapture(): boolean {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { spawn } = require('child_process') as typeof import('child_process')
 
   let ffmpegArgs: string[]
 
-  if (source === 'system' && process.platform === 'win32') {
-    // Windows: захват системного звука через dshow (Stereo Mix)
+  if (process.platform === 'win32') {
     ffmpegArgs = [
       '-f', 'dshow',
       '-i', 'audio=Stereo Mix (Realtek Audio)',
@@ -255,8 +325,7 @@ function startFallbackCapture(
       '-f', 's16le',
       '-'
     ]
-  } else if (source === 'system' && process.platform === 'darwin') {
-    // macOS — захват через BlackHole/Soundflower
+  } else if (process.platform === 'darwin') {
     ffmpegArgs = [
       '-f', 'avfoundation',
       '-i', ':BlackHole 2ch',
@@ -266,23 +335,7 @@ function startFallbackCapture(
       '-f', 's16le',
       '-'
     ]
-  } else if (source === 'mic') {
-    // Микрофон — через платформенный захватчик
-    const deviceFormat = process.platform === 'win32' ? 'dshow' :
-      process.platform === 'darwin' ? 'avfoundation' : 'alsa'
-    const deviceName = process.platform === 'win32' ? 'audio=Microphone' :
-      process.platform === 'darwin' ? ':Built-in Microphone' : 'default'
-    ffmpegArgs = [
-      '-f', deviceFormat,
-      '-i', deviceName,
-      '-ar', String(SAMPLE_RATE),
-      '-ac', String(CHANNELS),
-      '-sample_fmt', 's16',
-      '-f', 's16le',
-      '-'
-    ]
   } else {
-    // Linux ALSA — системный звук
     ffmpegArgs = [
       '-f', 'alsa',
       '-i', 'default',
@@ -294,153 +347,91 @@ function startFallbackCapture(
     ]
   }
 
-  console.log(`[audioCapture] Запуск ffmpeg (${source}): ffmpeg ${ffmpegArgs.join(' ')}`)
+  console.log(`[audioCapture] Запуск ffmpeg (system): ${ffmpegArgs.join(' ')}`)
 
   try {
-    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: stderr = 'pipe' вместо 'ignore'!
-    // Без этого мы не видим ошибки ffmpeg (нет устройства, ffmpeg не установлен и т.д.)
     const ffmpeg = spawn('ffmpeg', ffmpegArgs, {
       stdio: ['ignore', 'pipe', 'pipe']
     })
+    ffmpegSystemProcess = ffmpeg
 
-    // Сохраняем ссылку на процесс на уровне модуля
-    if (source === 'system') {
-      ffmpegSystemProcess = ffmpeg
-    } else {
-      ffmpegMicProcess = ffmpeg
-    }
-
-    // ─── Логирование stderr ffmpeg ───
-    // ffmpeg выводит всю диагностику в stderr (не stdout!)
     let stderrBuffer = ''
     ffmpeg.stderr?.on('data', (data: Buffer) => {
       const text = data.toString()
       stderrBuffer += text
-      // Выводим каждую строку stderr в консоль для диагностики
       const lines = text.trim().split('\n')
       for (const line of lines) {
-        // Фильтруем шум — выводим только ошибки и предупреждения
-        if (line.includes('[error]') || line.includes('[warning]') ||
-            line.includes('Error') || line.includes('error') ||
+        if (line.includes('[error]') || line.includes('Error') ||
             line.includes('Cannot') || line.includes('No such')) {
-          console.error(`[audioCapture] ffmpeg stderr (${source}): ${line}`)
+          console.error(`[audioCapture] ffmpeg stderr (system): ${line}`)
         }
       }
     })
 
-    // Флаг успешного старта: ffmpeg считается запущенным,
-    // если не упал в первые 3 секунды или если пришли первые данные
     let startupConfirmed = false
-    let firstDataReceived = false
     const startupTimer = setTimeout(() => {
       if (!startupConfirmed) {
         startupConfirmed = true
-        if (firstDataReceived) {
-          console.log(`[audioCapture] ✅ ffmpeg (${source}) стартовал успешно — данные поступают`)
-        } else {
-          console.warn(`[audioCapture] ⚠️ ffmpeg (${source}) работает, но данные НЕ поступают.`)
-          console.warn(`[audioCapture]    Возможные причины:`)
-          console.warn(`[audioCapture]    - ffmpeg не найден в PATH`)
-          console.warn(`[audioCapture]    - Аудио-устройство не найдено / захардкоженное имя`)
-          console.warn(`[audioCapture]    - Устройство занято другим приложением`)
-          if (stderrBuffer.length > 0) {
-            console.warn(`[audioCapture]    Последний stderr:\n${stderrBuffer.slice(-500)}`)
-          }
+        console.warn('[audioCapture] ⚠️ ffmpeg system: данные не поступают')
+        if (stderrBuffer.length > 0) {
+          console.warn(`[audioCapture]    stderr: ${stderrBuffer.slice(-300)}`)
         }
       }
-    }, 3000)
+    }, 5000)
 
     ffmpeg.stdout?.on('data', (data: Buffer) => {
-      // Первые данные = процесс работает, подтверждаем старт
       if (!startupConfirmed) {
         startupConfirmed = true
-        firstDataReceived = true
         clearTimeout(startupTimer)
-        console.log(`[audioCapture] ✅ ffmpeg (${source}) — первые аудио-данные получены (${data.length} байт)`)
+        console.log(`[audioCapture] ✅ ffmpeg system — первые данные (${data.length} байт)`)
       }
-      chunkBuf.push(data)
+      systemChunkBuf?.push(data)
     })
 
     ffmpeg.on('error', (err: Error) => {
-      console.error(`[audioCapture] ❌ ffmpeg error (${source}):`, err.message)
+      console.error('[audioCapture] ❌ ffmpeg error (system):', err.message)
       clearTimeout(startupTimer)
-      // Очищаем ссылку на упавший процесс
-      if (source === 'system') {
-        ffmpegSystemProcess = null
-      } else {
-        ffmpegMicProcess = null
-      }
+      ffmpegSystemProcess = null
     })
 
-    ffmpeg.on('close', (code: number | null, signal: string | null) => {
-      console.log(`[audioCapture] ffmpeg exited (${source}) with code=${code} signal=${signal}`)
-      if (code !== 0 && stderrBuffer.length > 0) {
-        console.error(`[audioCapture] ffmpeg stderr (последние 500 символов):\n${stderrBuffer.slice(-500)}`)
-      }
+    ffmpeg.on('close', (code) => {
+      console.log(`[audioCapture] ffmpeg system exited code=${code}`)
       clearTimeout(startupTimer)
-      // Очищаем ссылку на завершённый процесс
-      if (source === 'system') {
-        ffmpegSystemProcess = null
-      } else {
-        ffmpegMicProcess = null
-      }
+      ffmpegSystemProcess = null
     })
 
     return true
   } catch (err) {
-    console.error(`[audioCapture] ❌ Не удалось запустить ffmpeg (${source}):`, (err as Error).message)
-    console.error(`[audioCapture]    Убедитесь что ffmpeg установлен и доступен в PATH`)
+    console.error('[audioCapture] ❌ ffmpeg не запустился:', (err as Error).message)
     return false
   }
 }
 
-/**
- * Безопасно убивает процесс ffmpeg по ссылке.
- * Сначала SIGKILL, на Windows — fallback на kill() без сигнала.
- */
 function killFfmpegProcess(proc: ChildProcess | null, source: AudioSource): void {
   if (!proc) return
   if (proc.killed || proc.exitCode !== null) return
-
   try {
     proc.kill('SIGKILL')
-    console.log(`[audioCapture] ffmpeg (${source}) убит (SIGKILL)`)
   } catch {
-    // На Windows SIGKILL может не поддерживаться
-    try {
-      proc.kill()
-      console.log(`[audioCapture] ffmpeg (${source}) убит (default signal)`)
-    } catch (e) {
+    try { proc.kill() } catch (e) {
       console.warn(`[audioCapture] Не удалось убить ffmpeg (${source}):`, (e as Error).message)
     }
   }
 }
 
-// ─── Нативный WASAPI loopback ────────────────────────────────────────
+// ─── Приём микрофонных чанков от Renderer ───────────────────────────
 
-let systemChunkBuf: ChunkBuffer | null = null
-let micChunkBuf: ChunkBuffer | null = null
-
-function startNativeLoopbackCapture(): void {
-  if (!nativeLoopback) {
-    console.warn('[audioCapture] Нативный loopback недоступен, fallback через ffmpeg')
-    return
-  }
-  // WASAPI обычно отдаёт 44.1kHz стерео
-  systemChunkBuf = new ChunkBuffer('system', 44100, 2)
-  nativeLoopback.start((buffer: Buffer) => {
-    systemChunkBuf?.push(buffer)
-  })
-  console.log('[audioCapture] ✅ WASAPI loopback захват запущен')
-}
-
-function stopNativeLoopbackCapture(): void {
-  if (nativeLoopback) {
-    nativeLoopback.stop()
-    console.log('[audioCapture] WASAPI loopback захват остановлен')
-  }
-  systemChunkBuf?.flush()
-  systemChunkBuf = null
+/**
+ * Вызывается когда Renderer отправляет PCM-чанк микрофона
+ * через IPC (audio:sendMicChunk).
+ *
+ * Данные уже в формате 16kHz, Mono, 16-bit PCM —
+ * просто кормим в ChunkBuffer.
+ */
+export function handleMicChunkFromRenderer(data: ArrayBuffer): void {
+  if (!captureState.mic) return
+  const buf = Buffer.from(data)
+  micChunkBuf?.push(buf)
 }
 
 // ─── Публичный API ───────────────────────────────────────────────────
@@ -449,7 +440,17 @@ export function setChunkCallback(cb: AudioChunkCallback): void {
   chunkCallback = cb
 }
 
-export function startCapture(source: AudioSource): boolean {
+/**
+ * Запуск захвата.
+ *
+ * 'mic'  — создаёт ChunkBuffer в main, отправляет сигнал
+ *          Renderer-у начать getUserMedia. Сама запись
+ *          происходит в Renderer (audioCapture hook).
+ *
+ * 'system' — WASAPI loopback или ffmpeg fallback.
+ *            Все ошибки обёрнуты в try/catch.
+ */
+export async function startCapture(source: AudioSource): Promise<boolean> {
   if (captureState[source]) {
     console.warn(`[audioCapture] ${source} уже захватывается`)
     return true
@@ -458,61 +459,61 @@ export function startCapture(source: AudioSource): boolean {
   console.log(`[audioCapture] Запуск захвата: ${source}`)
 
   if (source === 'system') {
-    // Загружаем нативный модуль ДО проверки nativeLoopback
-    loadNativeLoopback()
+    try {
+      // Пытаемся WASAPI
+      if (!nativeLoadFailed && !nativeCaptureInstance) {
+        loadNativeLoopback()
+      }
+      if (process.platform === 'win32' && nativeCaptureInstance && !nativeLoadFailed) {
+        const nativeOk = await startNativeLoopbackCapture()
+        if (nativeOk) {
+          captureState.system = true
+          return true
+        }
+        console.warn('[audioCapture] WinAudioCapture не удался, пробуем ffmpeg')
+      }
 
-    if (process.platform === 'win32' && nativeLoopback) {
-      startNativeLoopbackCapture()
+      // Fallback через ffmpeg
+      systemChunkBuf = new ChunkBuffer('system', SAMPLE_RATE, CHANNELS)
+      const ffmpegOk = startFfmpegSystemCapture()
+      if (!ffmpegOk) {
+        console.error('[audioCapture] ❌ Системный звук: все методы провалились')
+        return false
+      }
       captureState.system = true
-      console.log('[audioCapture] ✅ Системный звук: WASAPI loopback запущен')
       return true
-    }
-
-    // Fallback через ffmpeg
-    console.log('[audioCapture] WASAPI недоступен, пробуем ffmpeg fallback для системного звука')
-    systemChunkBuf = new ChunkBuffer('system', SAMPLE_RATE, CHANNELS)
-    const ffmpegOk = startFallbackCapture('system', systemChunkBuf)
-    if (!ffmpegOk) {
-      console.error('[audioCapture] ❌ Системный звук: ffmpeg fallback не запустился')
+    } catch (err) {
+      console.error('[audioCapture] ❌ Системный звук: неожиданная ошибка:', (err as Error).message)
       return false
     }
-    captureState.system = true
-    console.log('[audioCapture] Системный звук: ffmpeg fallback запущен')
-    return true
   }
 
-  // Микрофон
+  // ─── Микрофон ───
+  // Создаём буфер, устанавливаем флаг.
+  // Фактический захват происходит в Renderer через getUserMedia.
+  // Renderer получит сигнал через IPC (audio:micCaptureStart).
   micChunkBuf = new ChunkBuffer('mic', SAMPLE_RATE, CHANNELS)
-  const micOk = startFallbackCapture('mic', micChunkBuf)
-  if (!micOk) {
-    console.error('[audioCapture] ❌ Микрофон: ffmpeg не запустился')
-    return false
-  }
   captureState.mic = true
-  console.log('[audioCapture] ✅ Микрофон: захват запущен')
+  console.log('[audioCapture] ✅ Микрофон: ChunkBuffer создан, ожидаем данные от Renderer')
   return true
 }
 
 export function stopCapture(source: AudioSource): void {
   if (!captureState[source]) return
-
   console.log(`[audioCapture] Остановка захвата: ${source}`)
 
   if (source === 'system') {
-    stopNativeLoopbackCapture()
+    try { stopNativeLoopbackCapture() } catch { /* safe */ }
     killFfmpegProcess(ffmpegSystemProcess, 'system')
     ffmpegSystemProcess = null
     systemChunkBuf?.flush()
     systemChunkBuf = null
     captureState.system = false
-    console.log('[audioCapture] Системный звук: остановлен')
   } else {
-    killFfmpegProcess(ffmpegMicProcess, 'mic')
-    ffmpegMicProcess = null
+    // Renderer получит сигнал через IPC (audio:micCaptureStop)
     micChunkBuf?.flush()
     micChunkBuf = null
     captureState.mic = false
-    console.log('[audioCapture] Микрофон: остановлен')
   }
 }
 
@@ -526,8 +527,7 @@ export function getCaptureState(): AudioCaptureState {
 }
 
 /**
- * Создаёт callback, который отправляет аудио-чанки
- * в renderer-процесс через IPC.
+ * Создаёт callback для отправки чанков в renderer через IPC.
  */
 export function createIpcChunkSender(
   getWindow: () => BrowserWindow | null

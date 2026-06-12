@@ -1,6 +1,3 @@
-function getDefaultExportFromCjs(x2) {
-  return x2 && x2.__esModule && Object.prototype.hasOwnProperty.call(x2, "default") ? x2["default"] : x2;
-}
 var jsxRuntime = { exports: {} };
 var reactJsxRuntime_production_min = {};
 var react = { exports: {} };
@@ -266,7 +263,6 @@ react_production_min.version = "18.3.1";
   react.exports = react_production_min;
 }
 var reactExports = react.exports;
-const React = /* @__PURE__ */ getDefaultExportFromCjs(reactExports);
 /**
  * @license React
  * react-jsx-runtime.production.min.js
@@ -293,7 +289,6 @@ reactJsxRuntime_production_min.jsxs = q;
   jsxRuntime.exports = reactJsxRuntime_production_min;
 }
 var jsxRuntimeExports = jsxRuntime.exports;
-var client = {};
 var reactDom = { exports: {} };
 var reactDom_production_min = {};
 var scheduler = { exports: {} };
@@ -6961,10 +6956,11 @@ function checkDCE() {
   reactDom.exports = reactDom_production_min;
 }
 var reactDomExports = reactDom.exports;
+var createRoot;
 var m = reactDomExports;
 {
-  client.createRoot = m.createRoot;
-  client.hydrateRoot = m.hydrateRoot;
+  createRoot = m.createRoot;
+  m.hydrateRoot;
 }
 function SettingsPanel({ onClose }) {
   const [settings, setSettings] = reactExports.useState(null);
@@ -7378,6 +7374,99 @@ function TranscriptPanel() {
       ` })
   ] });
 }
+const TARGET_SAMPLE_RATE = 16e3;
+const TARGET_CHANNELS = 1;
+function useMicCapture() {
+  const audioContextRef = reactExports.useRef(null);
+  const streamRef = reactExports.useRef(null);
+  const processorRef = reactExports.useRef(null);
+  const sourceRef = reactExports.useRef(null);
+  const isActiveRef = reactExports.useRef(false);
+  const stopCapture = reactExports.useCallback(() => {
+    if (!isActiveRef.current) return;
+    isActiveRef.current = false;
+    try {
+      processorRef.current?.disconnect();
+      sourceRef.current?.disconnect();
+      audioContextRef.current?.close();
+      streamRef.current?.getTracks().forEach((t2) => t2.stop());
+    } catch (err) {
+      console.warn("[useMicCapture] Ошибка при остановке:", err.message);
+    }
+    processorRef.current = null;
+    sourceRef.current = null;
+    audioContextRef.current = null;
+    streamRef.current = null;
+    console.log("[useMicCapture] ⏹ Захват микрофона остановлен");
+  }, []);
+  const startCapture = reactExports.useCallback(async () => {
+    if (isActiveRef.current) {
+      console.warn("[useMicCapture] Захват уже активен");
+      return true;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: TARGET_CHANNELS,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+      streamRef.current = stream;
+      const ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      audioContextRef.current = ctx;
+      console.log(`[useMicCapture] AudioContext: sampleRate=${ctx.sampleRate}, state=${ctx.state}`);
+      const source = ctx.createMediaStreamSource(stream);
+      sourceRef.current = source;
+      const processor = ctx.createScriptProcessor(4096, TARGET_CHANNELS, TARGET_CHANNELS);
+      processorRef.current = processor;
+      processor.onaudioprocess = (e) => {
+        if (!isActiveRef.current) return;
+        const float32 = e.inputBuffer.getChannelData(0);
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          const s = Math.max(-1, Math.min(1, float32[i]));
+          int16[i] = s < 0 ? s * 32768 : s * 32767;
+        }
+        try {
+          window.copilot.audio.sendMicChunk(int16.buffer);
+        } catch (err) {
+          console.warn("[useMicCapture] Ошибка отправки чанка:", err.message);
+        }
+      };
+      source.connect(processor);
+      processor.connect(ctx.destination);
+      isActiveRef.current = true;
+      console.log("[useMicCapture] ✅ Захват запущен: 16kHz mono 16-bit PCM via getUserMedia");
+      return true;
+    } catch (err) {
+      console.error("[useMicCapture] ❌ Ошибка запуска:", err.message);
+      stopCapture();
+      return false;
+    }
+  }, [stopCapture]);
+  reactExports.useEffect(() => {
+    const unsubStart = window.copilot.audio.onMicCaptureStart(() => {
+      console.log("[useMicCapture] Получен сигнал micCaptureStart от Main");
+      void startCapture();
+    });
+    const unsubStop = window.copilot.audio.onMicCaptureStop(() => {
+      console.log("[useMicCapture] Получен сигнал micCaptureStop от Main");
+      stopCapture();
+    });
+    return () => {
+      unsubStart();
+      unsubStop();
+      stopCapture();
+    };
+  }, [startCapture, stopCapture]);
+  return {
+    startCapture,
+    stopCapture,
+    isActive: () => isActiveRef.current
+  };
+}
 function getRouteFromHash() {
   const hash = window.location.hash.replace(/^#\/?/, "");
   if (hash === "suggestion" || hash === "transcript") return hash;
@@ -7387,6 +7476,7 @@ function App() {
   const [route] = reactExports.useState(getRouteFromHash);
   const [recording, setRecording] = reactExports.useState(false);
   const [settingsOpen, setSettingsOpen] = reactExports.useState(false);
+  useMicCapture();
   const toggleRecording = reactExports.useCallback(async () => {
     if (recording) {
       await window.copilot.audio.stopStreams();
@@ -7417,6 +7507,6 @@ function App() {
       );
   }
 }
-client.createRoot(document.getElementById("root")).render(
-  /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
+createRoot(document.getElementById("root")).render(
+  /* @__PURE__ */ jsxRuntimeExports.jsx(reactExports.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
 );

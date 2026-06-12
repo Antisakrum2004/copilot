@@ -3,6 +3,7 @@ import { SettingsPanel } from './components/SettingsPanel'
 import { SuggestionPanel } from './components/SuggestionPanel'
 import { Toolbar } from './components/Toolbar'
 import { TranscriptPanel } from './components/TranscriptPanel'
+import { useMicCapture } from './hooks/useMicCapture'
 
 type Route = 'toolbar' | 'suggestion' | 'transcript'
 
@@ -17,6 +18,9 @@ export default function App() {
   const [recording, setRecording] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
 
+  // Хук захвата микрофона через getUserMedia + AudioContext + IPC
+  useMicCapture()
+
   // ВАЖНО: НЕ вызываем setIgnoreMouseEvents здесь!
   // Каждое окно управляет своим mouse-поведением:
   //   - toolbar: всегда кликабельный (настраивается в main процессе)
@@ -29,7 +33,7 @@ export default function App() {
       await window.copilot.audio.stopNativeLoopback()
       setRecording(false)
     } else {
-      // Запускаем захват: микрофон + системный звук (loopback)
+      // Запускаем захват: микрофон (getUserMedia в renderer) + системный звук (WASAPI в main)
       await window.copilot.audio.startStreams()
       await window.copilot.audio.startNativeLoopback()
       setRecording(true)

@@ -8,18 +8,29 @@ const IPC = {
     stopStreams: "audio:stopStreams",
     startNativeLoopback: "audio:startNativeLoopback",
     stopNativeLoopback: "audio:stopNativeLoopback",
+    micChunk: "audio:micChunk",
+    speakerChunk: "audio:speakerChunk",
+    loopbackData: "audio-loopback-data",
     loopbackStarted: "audio-loopback-started",
     loopbackStopped: "audio-loopback-stopped",
     loopbackError: "audio-loopback-error",
     enableLoopback: "enable-loopback-audio",
-    disableLoopback: "disable-loopback-audio"
+    disableLoopback: "disable-loopback-audio",
+    /** Main → Renderer: начать захват микрофона через getUserMedia */
+    micCaptureStart: "audio:micCaptureStart",
+    /** Main → Renderer: остановить захват микрофона */
+    micCaptureStop: "audio:micCaptureStop",
+    /** Renderer → Main: PCM-чанк с микрофона (16kHz, mono, 16-bit) */
+    sendMicChunk: "audio:sendMicChunk"
   },
   transcription: {
     update: "transcription-update",
     clear: "transcription-clear",
     openWindow: "transcription:open-window",
     closeWindow: "transcription:close-window",
-    isWindowOpen: "transcription:is-window-open"
+    isWindowOpen: "transcription:is-window-open",
+    /** Получить текущий накопленный текст созвона */
+    getCurrent: "transcript:getCurrent"
   },
   suggestion: {
     show: "suggestion:show",
@@ -29,7 +40,13 @@ const IPC = {
     setWidth: "suggestion:set-width",
     setHeight: "suggestion:set-height",
     toggleVisibility: "suggestion:toggle-visibility",
-    openWindow: "open-suggestion-window"
+    openWindow: "open-suggestion-window",
+    /** Запросить подсказку у LLM вручную */
+    request: "suggestion:request",
+    /** Прервать текущий стриминг */
+    abort: "suggestion:abort",
+    /** Узнать, стримится ли сейчас ответ */
+    isStreaming: "suggestion:isStreaming"
   },
   window: {
     setIgnoreMouseEvents: "window:setIgnoreMouseEvents",
@@ -85,6 +102,7 @@ function baseOverlayOptions(preloadPath, size, kind) {
   const display = electron.screen.getPrimaryDisplay();
   const { width: screenW } = display.workAreaSize;
   const isToolbar = kind === "toolbar";
+  const isDebugPanel = !isToolbar;
   return {
     width: size.width,
     height: size.height,
@@ -93,7 +111,7 @@ function baseOverlayOptions(preloadPath, size, kind) {
     maxWidth: 2e3,
     maxHeight: 800,
     x: Math.round(screenW / 2 - size.width / 2),
-    y: 48,
+    y: isToolbar ? 48 : 120,
     show: false,
     resizable: true,
     minimizable: false,
@@ -102,10 +120,12 @@ function baseOverlayOptions(preloadPath, size, kind) {
     skipTaskbar: true,
     alwaysOnTop: true,
     focusable: isToolbar,
-    frame: false,
-    transparent: true,
-    hasShadow: false,
-    backgroundColor: "#00000000",
+    frame: isDebugPanel,
+    // suggestion/transcript: видимая рамка для дебага
+    transparent: !isDebugPanel,
+    // suggestion/transcript: НЕ прозрачные
+    hasShadow: isDebugPanel,
+    backgroundColor: isDebugPanel ? "#14141e" : "#00000000",
     titleBarStyle: "hidden",
     autoHideMenuBar: true,
     ...process.platform === "darwin" ? { type: "panel" } : {},
@@ -158,41 +178,7 @@ const CHUNK_SIZE_SAMPLES = SAMPLE_RATE * CHUNK_DURATION_MS / 1e3;
 const CHUNK_SIZE_BYTES = CHUNK_SIZE_SAMPLES * (BITS_PER_SAMPLE / 8);
 let captureState = { mic: false, system: false };
 let chunkCallback = null;
-let nativeLoopback = null;
-let ffmpegMicProcess = null;
 let ffmpegSystemProcess = null;
-function loadNativeLoopback() {
-  if (process.platform !== "win32") {
-    console.warn("[audioCapture] WASAPI loopback доступен только на Windows");
-    return;
-  }
-  if (nativeLoopback) {
-    console.log("[audioCapture] WASAPI loopback уже загружен");
-    return;
-  }
-  try {
-    const mod = require("win-audio-capture");
-    nativeLoopback = {
-      start: (cb) => {
-        mod.startCapture((buffer) => {
-          cb(buffer);
-        });
-      },
-      stop: () => {
-        mod.stopCapture();
-      }
-    };
-    console.log("[audioCapture] ✅ Нативный WASAPI loopback загружен успешно");
-  } catch (err) {
-    const error = err;
-    console.error("[audioCapture] ❌ КРИТИЧЕСКАЯ ОШИБКА НАТИВНОГО АУДИО:");
-    console.error("[audioCapture]    message:", error.message);
-    console.error("[audioCapture]    name:", error.name);
-    console.error("[audioCapture]    stack:", error.stack?.split("\n").slice(0, 3).join("\n"));
-    console.warn("[audioCapture] → Переключаемся на ffmpeg fallback");
-    nativeLoopback = null;
-  }
-}
 function convertToTargetFormat(inputBuffer, inputSampleRate, inputChannels) {
   const inputSamples = inputBuffer.length / (BITS_PER_SAMPLE / 8) / inputChannels;
   const outputSamples = Math.round(inputSamples * SAMPLE_RATE / inputSampleRate);
@@ -247,7 +233,6 @@ class ChunkBuffer {
     this.inputSampleRate = inputSampleRate;
     this.inputChannels = inputChannels;
   }
-  /** Добавить аудио-данные в буфер */
   push(data) {
     this.buffer = Buffer.concat([this.buffer, data]);
     while (this.buffer.length >= CHUNK_SIZE_BYTES) {
@@ -259,11 +244,9 @@ class ChunkBuffer {
       }
     }
   }
-  /** Сбросить буфер */
   reset() {
     this.buffer = Buffer.alloc(0);
   }
-  /** Оставшиеся данные (flush) */
   flush() {
     if (this.buffer.length > 0 && chunkCallback) {
       const converted = convertToTargetFormat(
@@ -276,10 +259,122 @@ class ChunkBuffer {
     this.buffer = Buffer.alloc(0);
   }
 }
-function startFallbackCapture(source, chunkBuf) {
+let systemChunkBuf = null;
+let micChunkBuf = null;
+let nativeCaptureInstance = null;
+let nativeLoadFailed = false;
+let nativeCaptureActive = false;
+function loadNativeLoopback() {
+  if (process.platform !== "win32") {
+    console.warn("[audioCapture] WASAPI loopback доступен только на Windows");
+    return;
+  }
+  if (nativeLoadFailed || nativeCaptureInstance) return;
+  try {
+    const mod = require("win-audio-capture");
+    const WinAudioCapture = mod.WinAudioCapture || mod.default;
+    if (!WinAudioCapture || typeof WinAudioCapture !== "function") {
+      console.error("[audioCapture] WinAudioCapture класс НЕ найден в экспорте");
+      nativeLoadFailed = true;
+      return;
+    }
+    nativeCaptureInstance = new WinAudioCapture();
+    const requiredMethods = ["getDevices", "startCapture", "stopCapture", "getRecommendedDevice"];
+    for (const method of requiredMethods) {
+      if (typeof nativeCaptureInstance[method] !== "function") {
+        console.error(`[audioCapture] WinAudioCapture.${method} — НЕ функция`);
+        nativeLoadFailed = true;
+        nativeCaptureInstance = null;
+        return;
+      }
+    }
+    console.log("[audioCapture] ✅ WinAudioCapture загружен");
+  } catch (err) {
+    console.error("[audioCapture] ❌ Ошибка загрузки win-audio-capture:", err.message);
+    nativeLoadFailed = true;
+    nativeCaptureInstance = null;
+  }
+}
+async function startNativeLoopbackCapture() {
+  if (!nativeCaptureInstance) return false;
+  if (nativeCaptureActive) {
+    console.warn("[audioCapture] Loopback уже запущен");
+    return true;
+  }
+  try {
+    const devices = await nativeCaptureInstance.getDevices();
+    let selectedDevice = nativeCaptureInstance.getRecommendedDevice(devices);
+    if (!selectedDevice) {
+      const stereoMix = devices.find(
+        (d) => d.deviceType === "stereo_mix" || d.name && d.name.toLowerCase().includes("stereo mix")
+      );
+      if (stereoMix) {
+        selectedDevice = stereoMix;
+      } else if (devices.length > 0) {
+        console.warn("[audioCapture] Stereo Mix не найден, пробуем первое устройство:", devices[0].name);
+        selectedDevice = devices[0];
+      }
+    }
+    if (!selectedDevice) {
+      console.error("[audioCapture] ❌ Нет аудио-устройств для системного захвата");
+      nativeLoadFailed = true;
+      return false;
+    }
+    console.log(`[audioCapture] Выбрано устройство: "${selectedDevice.name}"`);
+    systemChunkBuf = new ChunkBuffer("system", 44100, 2);
+    let wavHeaderSkipped = false;
+    await nativeCaptureInstance.startCapture({
+      device: selectedDevice.name,
+      sampleRate: 44100,
+      channels: 2,
+      bitDepth: 16,
+      onData: (chunk) => {
+        if (!chunk || chunk.length === 0) return;
+        let data = chunk;
+        if (!wavHeaderSkipped) {
+          if (chunk.length > 44) {
+            data = chunk.subarray(44);
+            wavHeaderSkipped = true;
+          } else {
+            return;
+          }
+        }
+        systemChunkBuf?.push(data);
+      }
+    });
+    nativeCaptureActive = true;
+    console.log(`[audioCapture] ✅ Системный звук: WinAudioCapture запущен`);
+    return true;
+  } catch (err) {
+    const error = err;
+    console.error("[audioCapture] ❌ WinAudioCapture.startCapture():", error.message);
+    if (error.message && error.message.toLowerCase().includes("already running")) {
+      console.log("[audioCapture] ✅ Захват уже запущен (already running)");
+      nativeCaptureActive = true;
+      return true;
+    }
+    nativeLoadFailed = true;
+    nativeCaptureActive = false;
+    console.warn("[audioCapture] → Переключаемся на ffmpeg fallback");
+    return false;
+  }
+}
+function stopNativeLoopbackCapture() {
+  try {
+    if (nativeCaptureInstance && nativeCaptureActive) {
+      void nativeCaptureInstance.stopCapture();
+    }
+  } catch (err) {
+    console.warn("[audioCapture] Ошибка stopCapture():", err.message);
+  }
+  nativeCaptureActive = false;
+  systemChunkBuf?.flush();
+  systemChunkBuf = null;
+}
+function startFfmpegSystemCapture() {
   const { spawn } = require("child_process");
   let ffmpegArgs;
-  if (source === "system" && process.platform === "win32") {
+  if (process.platform === "win32") {
     ffmpegArgs = [
       "-f",
       "dshow",
@@ -295,30 +390,12 @@ function startFallbackCapture(source, chunkBuf) {
       "s16le",
       "-"
     ];
-  } else if (source === "system" && process.platform === "darwin") {
+  } else if (process.platform === "darwin") {
     ffmpegArgs = [
       "-f",
       "avfoundation",
       "-i",
       ":BlackHole 2ch",
-      "-ar",
-      String(SAMPLE_RATE),
-      "-ac",
-      String(CHANNELS),
-      "-sample_fmt",
-      "s16",
-      "-f",
-      "s16le",
-      "-"
-    ];
-  } else if (source === "mic") {
-    const deviceFormat = process.platform === "win32" ? "dshow" : process.platform === "darwin" ? "avfoundation" : "alsa";
-    const deviceName = process.platform === "win32" ? "audio=Microphone" : process.platform === "darwin" ? ":Built-in Microphone" : "default";
-    ffmpegArgs = [
-      "-f",
-      deviceFormat,
-      "-i",
-      deviceName,
       "-ar",
       String(SAMPLE_RATE),
       "-ac",
@@ -346,82 +423,54 @@ function startFallbackCapture(source, chunkBuf) {
       "-"
     ];
   }
-  console.log(`[audioCapture] Запуск ffmpeg (${source}): ffmpeg ${ffmpegArgs.join(" ")}`);
+  console.log(`[audioCapture] Запуск ffmpeg (system): ${ffmpegArgs.join(" ")}`);
   try {
     const ffmpeg = spawn("ffmpeg", ffmpegArgs, {
       stdio: ["ignore", "pipe", "pipe"]
     });
-    if (source === "system") {
-      ffmpegSystemProcess = ffmpeg;
-    } else {
-      ffmpegMicProcess = ffmpeg;
-    }
+    ffmpegSystemProcess = ffmpeg;
     let stderrBuffer = "";
     ffmpeg.stderr?.on("data", (data) => {
       const text = data.toString();
       stderrBuffer += text;
       const lines = text.trim().split("\n");
       for (const line of lines) {
-        if (line.includes("[error]") || line.includes("[warning]") || line.includes("Error") || line.includes("error") || line.includes("Cannot") || line.includes("No such")) {
-          console.error(`[audioCapture] ffmpeg stderr (${source}): ${line}`);
+        if (line.includes("[error]") || line.includes("Error") || line.includes("Cannot") || line.includes("No such")) {
+          console.error(`[audioCapture] ffmpeg stderr (system): ${line}`);
         }
       }
     });
     let startupConfirmed = false;
-    let firstDataReceived = false;
     const startupTimer = setTimeout(() => {
       if (!startupConfirmed) {
         startupConfirmed = true;
-        if (firstDataReceived) {
-          console.log(`[audioCapture] ✅ ffmpeg (${source}) стартовал успешно — данные поступают`);
-        } else {
-          console.warn(`[audioCapture] ⚠️ ffmpeg (${source}) работает, но данные НЕ поступают.`);
-          console.warn(`[audioCapture]    Возможные причины:`);
-          console.warn(`[audioCapture]    - ffmpeg не найден в PATH`);
-          console.warn(`[audioCapture]    - Аудио-устройство не найдено / захардкоженное имя`);
-          console.warn(`[audioCapture]    - Устройство занято другим приложением`);
-          if (stderrBuffer.length > 0) {
-            console.warn(`[audioCapture]    Последний stderr:
-${stderrBuffer.slice(-500)}`);
-          }
+        console.warn("[audioCapture] ⚠️ ffmpeg system: данные не поступают");
+        if (stderrBuffer.length > 0) {
+          console.warn(`[audioCapture]    stderr: ${stderrBuffer.slice(-300)}`);
         }
       }
-    }, 3e3);
+    }, 5e3);
     ffmpeg.stdout?.on("data", (data) => {
       if (!startupConfirmed) {
         startupConfirmed = true;
-        firstDataReceived = true;
         clearTimeout(startupTimer);
-        console.log(`[audioCapture] ✅ ffmpeg (${source}) — первые аудио-данные получены (${data.length} байт)`);
+        console.log(`[audioCapture] ✅ ffmpeg system — первые данные (${data.length} байт)`);
       }
-      chunkBuf.push(data);
+      systemChunkBuf?.push(data);
     });
     ffmpeg.on("error", (err) => {
-      console.error(`[audioCapture] ❌ ffmpeg error (${source}):`, err.message);
+      console.error("[audioCapture] ❌ ffmpeg error (system):", err.message);
       clearTimeout(startupTimer);
-      if (source === "system") {
-        ffmpegSystemProcess = null;
-      } else {
-        ffmpegMicProcess = null;
-      }
+      ffmpegSystemProcess = null;
     });
-    ffmpeg.on("close", (code, signal) => {
-      console.log(`[audioCapture] ffmpeg exited (${source}) with code=${code} signal=${signal}`);
-      if (code !== 0 && stderrBuffer.length > 0) {
-        console.error(`[audioCapture] ffmpeg stderr (последние 500 символов):
-${stderrBuffer.slice(-500)}`);
-      }
+    ffmpeg.on("close", (code) => {
+      console.log(`[audioCapture] ffmpeg system exited code=${code}`);
       clearTimeout(startupTimer);
-      if (source === "system") {
-        ffmpegSystemProcess = null;
-      } else {
-        ffmpegMicProcess = null;
-      }
+      ffmpegSystemProcess = null;
     });
     return true;
   } catch (err) {
-    console.error(`[audioCapture] ❌ Не удалось запустить ffmpeg (${source}):`, err.message);
-    console.error(`[audioCapture]    Убедитесь что ffmpeg установлен и доступен в PATH`);
+    console.error("[audioCapture] ❌ ffmpeg не запустился:", err.message);
     return false;
   }
 }
@@ -430,93 +479,76 @@ function killFfmpegProcess(proc, source) {
   if (proc.killed || proc.exitCode !== null) return;
   try {
     proc.kill("SIGKILL");
-    console.log(`[audioCapture] ffmpeg (${source}) убит (SIGKILL)`);
   } catch {
     try {
       proc.kill();
-      console.log(`[audioCapture] ffmpeg (${source}) убит (default signal)`);
     } catch (e) {
       console.warn(`[audioCapture] Не удалось убить ffmpeg (${source}):`, e.message);
     }
   }
 }
-let systemChunkBuf = null;
-let micChunkBuf = null;
-function startNativeLoopbackCapture() {
-  if (!nativeLoopback) {
-    console.warn("[audioCapture] Нативный loopback недоступен, fallback через ffmpeg");
-    return;
-  }
-  systemChunkBuf = new ChunkBuffer("system", 44100, 2);
-  nativeLoopback.start((buffer) => {
-    systemChunkBuf?.push(buffer);
-  });
-  console.log("[audioCapture] ✅ WASAPI loopback захват запущен");
-}
-function stopNativeLoopbackCapture() {
-  if (nativeLoopback) {
-    nativeLoopback.stop();
-    console.log("[audioCapture] WASAPI loopback захват остановлен");
-  }
-  systemChunkBuf?.flush();
-  systemChunkBuf = null;
+function handleMicChunkFromRenderer(data) {
+  if (!captureState.mic) return;
+  const buf = Buffer.from(data);
+  micChunkBuf?.push(buf);
 }
 function setChunkCallback(cb) {
   chunkCallback = cb;
 }
-function startCapture(source) {
+async function startCapture(source) {
   if (captureState[source]) {
     console.warn(`[audioCapture] ${source} уже захватывается`);
     return true;
   }
   console.log(`[audioCapture] Запуск захвата: ${source}`);
   if (source === "system") {
-    loadNativeLoopback();
-    if (process.platform === "win32" && nativeLoopback) {
-      startNativeLoopbackCapture();
+    try {
+      if (!nativeLoadFailed && !nativeCaptureInstance) {
+        loadNativeLoopback();
+      }
+      if (process.platform === "win32" && nativeCaptureInstance && !nativeLoadFailed) {
+        const nativeOk = await startNativeLoopbackCapture();
+        if (nativeOk) {
+          captureState.system = true;
+          return true;
+        }
+        console.warn("[audioCapture] WinAudioCapture не удался, пробуем ffmpeg");
+      }
+      systemChunkBuf = new ChunkBuffer("system", SAMPLE_RATE, CHANNELS);
+      const ffmpegOk = startFfmpegSystemCapture();
+      if (!ffmpegOk) {
+        console.error("[audioCapture] ❌ Системный звук: все методы провалились");
+        return false;
+      }
       captureState.system = true;
-      console.log("[audioCapture] ✅ Системный звук: WASAPI loopback запущен");
       return true;
-    }
-    console.log("[audioCapture] WASAPI недоступен, пробуем ffmpeg fallback для системного звука");
-    systemChunkBuf = new ChunkBuffer("system", SAMPLE_RATE, CHANNELS);
-    const ffmpegOk = startFallbackCapture("system", systemChunkBuf);
-    if (!ffmpegOk) {
-      console.error("[audioCapture] ❌ Системный звук: ffmpeg fallback не запустился");
+    } catch (err) {
+      console.error("[audioCapture] ❌ Системный звук: неожиданная ошибка:", err.message);
       return false;
     }
-    captureState.system = true;
-    console.log("[audioCapture] Системный звук: ffmpeg fallback запущен");
-    return true;
   }
   micChunkBuf = new ChunkBuffer("mic", SAMPLE_RATE, CHANNELS);
-  const micOk = startFallbackCapture("mic", micChunkBuf);
-  if (!micOk) {
-    console.error("[audioCapture] ❌ Микрофон: ffmpeg не запустился");
-    return false;
-  }
   captureState.mic = true;
-  console.log("[audioCapture] ✅ Микрофон: захват запущен");
+  console.log("[audioCapture] ✅ Микрофон: ChunkBuffer создан, ожидаем данные от Renderer");
   return true;
 }
 function stopCapture(source) {
   if (!captureState[source]) return;
   console.log(`[audioCapture] Остановка захвата: ${source}`);
   if (source === "system") {
-    stopNativeLoopbackCapture();
+    try {
+      stopNativeLoopbackCapture();
+    } catch {
+    }
     killFfmpegProcess(ffmpegSystemProcess, "system");
     ffmpegSystemProcess = null;
     systemChunkBuf?.flush();
     systemChunkBuf = null;
     captureState.system = false;
-    console.log("[audioCapture] Системный звук: остановлен");
   } else {
-    killFfmpegProcess(ffmpegMicProcess, "mic");
-    ffmpegMicProcess = null;
     micChunkBuf?.flush();
     micChunkBuf = null;
     captureState.mic = false;
-    console.log("[audioCapture] Микрофон: остановлен");
   }
 }
 function stopAllCapture() {
@@ -874,8 +906,6 @@ function createMainWindows(preloadPath) {
   toolbarWindow = createOverlayWindow("toolbar", preloadPath, "toolbar");
   suggestionWindow = createOverlayWindow("suggestion", preloadPath, "suggestion");
   transcriptWindow = createOverlayWindow("transcript", preloadPath, "transcript");
-  suggestionWindow.hide();
-  transcriptWindow.hide();
   initSttService(() => getAnyWindow());
   initOpenRouterService();
   setupAudioPipeline();
@@ -980,33 +1010,49 @@ function registerIpcHandlers() {
     clearTranscript();
     broadcast(IPC.transcription.clear);
   });
+  electron.ipcMain.on(IPC.audio.sendMicChunk, (_event, data) => {
+    handleMicChunkFromRenderer(data);
+  });
   electron.ipcMain.handle(IPC.audio.startStreams, async () => {
-    console.log("[handlers] Запуск аудио-захвата...");
-    const micOk = startCapture("mic");
-    if (micOk) {
-      broadcast(IPC.audio.loopbackStarted);
-      return { ok: true };
-    } else {
-      broadcast(IPC.audio.loopbackError, "Не удалось запустить микрофон");
+    console.log("[handlers] Запуск аудио-захвата (микрофон)...");
+    try {
+      const micOk = await startCapture("mic");
+      if (micOk) {
+        broadcast(IPC.audio.micCaptureStart);
+        broadcast(IPC.audio.loopbackStarted);
+        return { ok: true };
+      } else {
+        broadcast(IPC.audio.loopbackError, "Не удалось запустить микрофон");
+        return { ok: false };
+      }
+    } catch (err) {
+      console.error("[handlers] Ошибка запуска микрофона:", err.message);
       return { ok: false };
     }
   });
   electron.ipcMain.handle(IPC.audio.stopStreams, async () => {
-    console.log("[handlers] Остановка аудио-захвата...");
+    console.log("[handlers] Остановка аудио-захвата (микрофон)...");
+    broadcast(IPC.audio.micCaptureStop);
     stopCapture("mic");
     broadcast(IPC.audio.loopbackStopped);
     return { ok: true };
   });
   electron.ipcMain.handle(IPC.audio.startNativeLoopback, async () => {
-    console.log("[handlers] Запуск WASAPI loopback...");
-    const sysOk = startCapture("system");
-    if (sysOk) {
-      broadcast(IPC.audio.loopbackStarted);
-      transcriptWindow?.showInactive();
-      suggestionWindow?.showInactive();
-      return { ok: true, native: process.platform === "win32" && !!getCaptureState().system };
-    } else {
-      broadcast(IPC.audio.loopbackError, "Не удалось запустить loopback");
+    console.log("[handlers] Запуск системного звука (WASAPI/ffmpeg)...");
+    try {
+      const sysOk = await startCapture("system");
+      if (sysOk) {
+        broadcast(IPC.audio.loopbackStarted);
+        transcriptWindow?.showInactive();
+        suggestionWindow?.showInactive();
+        return { ok: true, native: process.platform === "win32" && !!getCaptureState().system };
+      } else {
+        broadcast(IPC.audio.loopbackError, "Не удалось запустить loopback");
+        return { ok: false, native: false };
+      }
+    } catch (err) {
+      console.error("[handlers] Ошибка запуска системного звука:", err.message);
+      broadcast(IPC.audio.loopbackError, err.message);
       return { ok: false, native: false };
     }
   });
@@ -1017,8 +1063,13 @@ function registerIpcHandlers() {
     return { ok: true };
   });
   electron.ipcMain.handle(IPC.audio.enableLoopback, async () => {
-    const ok = startCapture("system");
-    return { ok };
+    try {
+      const ok = await startCapture("system");
+      return { ok };
+    } catch (err) {
+      console.error("[handlers] Ошибка enableLoopback:", err.message);
+      return { ok: false };
+    }
   });
   electron.ipcMain.handle(IPC.audio.disableLoopback, async () => {
     stopCapture("system");

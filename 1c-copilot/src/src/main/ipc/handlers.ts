@@ -23,6 +23,7 @@ import {
   getCaptureState,
   setChunkCallback,
   createIpcChunkSender,
+  handleMicChunkFromRenderer,
   type AudioSource
 } from '../services/audioCapture'
 import {
@@ -85,8 +86,10 @@ export function createMainWindows(preloadPath: string): BrowserWindow {
   suggestionWindow = createOverlayWindow('suggestion', preloadPath, 'suggestion')
   transcriptWindow = createOverlayWindow('transcript', preloadPath, 'transcript')
 
-  suggestionWindow.hide()
-  transcriptWindow.hide()
+  // Для ДЕБАГА: показываем все окна сразу при старте
+  // После отладки — раскомментировать hide()
+  // suggestionWindow.hide()
+  // transcriptWindow.hide()
 
   // ─── Инициализация сервисов ──────────────────────────────────────
 
@@ -255,42 +258,59 @@ export function registerIpcHandlers(): void {
 
   // --- Audio: РЕАЛЬНЫЙ ЗАХВАТ (вместо заглушек) ---
 
+  // --- Renderer → Main: микрофонные PCM-чанки ---
+  ipcMain.on(IPC.audio.sendMicChunk, (_event, data: ArrayBuffer) => {
+    handleMicChunkFromRenderer(data)
+  })
+
   ipcMain.handle(IPC.audio.startStreams, async () => {
-    console.log('[handlers] Запуск аудио-захвата...')
+    console.log('[handlers] Запуск аудио-захвата (микрофон)...')
 
-    // Запускаем захват микрофона
-    const micOk = startCapture('mic')
+    try {
+      const micOk = await startCapture('mic')
 
-    if (micOk) {
-      broadcast(IPC.audio.loopbackStarted)
-      return { ok: true }
-    } else {
-      broadcast(IPC.audio.loopbackError, 'Не удалось запустить микрофон')
+      if (micOk) {
+        // Сигналим Renderer-у начать getUserMedia
+        broadcast(IPC.audio.micCaptureStart)
+        broadcast(IPC.audio.loopbackStarted)
+        return { ok: true }
+      } else {
+        broadcast(IPC.audio.loopbackError, 'Не удалось запустить микрофон')
+        return { ok: false }
+      }
+    } catch (err) {
+      console.error('[handlers] Ошибка запуска микрофона:', (err as Error).message)
       return { ok: false }
     }
   })
 
   ipcMain.handle(IPC.audio.stopStreams, async () => {
-    console.log('[handlers] Остановка аудио-захвата...')
+    console.log('[handlers] Остановка аудио-захвата (микрофон)...')
+    // Сигналим Renderer-у остановить getUserMedia
+    broadcast(IPC.audio.micCaptureStop)
     stopCapture('mic')
     broadcast(IPC.audio.loopbackStopped)
     return { ok: true }
   })
 
   ipcMain.handle(IPC.audio.startNativeLoopback, async () => {
-    console.log('[handlers] Запуск WASAPI loopback...')
+    console.log('[handlers] Запуск системного звука (WASAPI/ffmpeg)...')
 
-    // Запускаем захват системного звука
-    const sysOk = startCapture('system')
+    try {
+      const sysOk = await startCapture('system')
 
-    if (sysOk) {
-      broadcast(IPC.audio.loopbackStarted)
-      // Показываем окно транскрипции при старте захвата
-      transcriptWindow?.showInactive()
-      suggestionWindow?.showInactive()
-      return { ok: true, native: process.platform === 'win32' && !!getCaptureState().system }
-    } else {
-      broadcast(IPC.audio.loopbackError, 'Не удалось запустить loopback')
+      if (sysOk) {
+        broadcast(IPC.audio.loopbackStarted)
+        transcriptWindow?.showInactive()
+        suggestionWindow?.showInactive()
+        return { ok: true, native: process.platform === 'win32' && !!getCaptureState().system }
+      } else {
+        broadcast(IPC.audio.loopbackError, 'Не удалось запустить loopback')
+        return { ok: false, native: false }
+      }
+    } catch (err) {
+      console.error('[handlers] Ошибка запуска системного звука:', (err as Error).message)
+      broadcast(IPC.audio.loopbackError, (err as Error).message)
       return { ok: false, native: false }
     }
   })
@@ -303,8 +323,13 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle(IPC.audio.enableLoopback, async () => {
-    const ok = startCapture('system')
-    return { ok }
+    try {
+      const ok = await startCapture('system')
+      return { ok }
+    } catch (err) {
+      console.error('[handlers] Ошибка enableLoopback:', (err as Error).message)
+      return { ok: false }
+    }
   })
 
   ipcMain.handle(IPC.audio.disableLoopback, async () => {
