@@ -52,3 +52,30 @@ Stage Summary:
 - Окна видны при старте (тёмный фон + рамка)
 - Сборка зелёная
 - Коммит d7f30e5 запушен в main
+---
+Task ID: memory-bank-creation
+Agent: Main Agent
+Task: Создать накопительный Банк Памяти (Memory Bank) — 10 файлов в 1c-copilot/src/docs/
+
+Work Log:
+- Отсканировал структуру проекта через Explore subagent (все файлы, экспорты, функции)
+- Прочитал все 10 существующих файлов docs/ — оказалось они устарели (ссылались на V100, v0.0.1-alpha, не отражали миграцию на getUserMedia)
+- Полностью перезаписал все 10 файлов с актуальными данными:
+  - INDEX.json: V1.0.0, Web Audio API в стеке, getUserMedia стратегия, обновлённые размеры файлов
+  - 01-overview.md: новая ASCII-схема с Renderer getUserMedia → IPC → Main → STT → LLM
+  - 02-api-quirks.md: добавлена секция getUserMedia ловушек, обновлены форматы данных
+  - 03-modules.md: добавлен useMicCapture.ts hook, актуальные строки/баги для каждого модуля
+  - 04-current-state.md: V1.0.0, 5 typecheck ошибок, история миграции микрофона
+  - 05-known-issues.md: все 5 TS ошибок, ложный spawn, systemChunkBuf null, кириллица ffmpeg
+  - 06-attempts-failures.md: ffmpeg dshow mic failure, recursive fallback failure
+  - 07-decisions.md: getUserMedia migration, WASAPI try/catch, debug overlay режим
+  - 08-coding-rules.md: PCM 16kHz святое, overlay #02000000, 11 критических уроков
+  - 09-next-steps.md: 7 уровней приоритетов от typecheck до будущего
+- Запустил npm run build — успешно (main 37.51KB, preload 5.86KB, renderer 234.96KB)
+- Git commit: 0352793
+- Git push: успешно в main
+
+Stage Summary:
+- 10 файлов Memory Bank полностью актуализированы (680 insertions, 503 deletions)
+- Сборка не сломана
+- Коммит запушен в main: https://github.com/Antisakrum2004/copilot
