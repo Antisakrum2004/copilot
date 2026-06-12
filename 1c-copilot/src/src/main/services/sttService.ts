@@ -8,6 +8,10 @@
  * Поддержка:
  *   - Groq (whisper-large-v3) — быстрый, бесплатно до лимитов
  *   - OpenAI (whisper-1) — стандартный, платный
+ *
+ * Rate limiting: Groq free tier = 20 RPM.
+ * С 6-секундными чанками и 2 потоками (mic+system) = ~20 RPM.
+ * Добавлена пауза 3с между запросами + retry при 429.
  */
 
 import { BrowserWindow } from 'electron'
@@ -25,6 +29,13 @@ const WHISPER_MODEL_OPENAI = 'whisper-1'
 
 // Минимальный размер чанка для отправки (иначе Whisper может вернуть пустой результат)
 const MIN_CHUNK_SIZE_BYTES = 32000 // ~1 сек при 16kHz 16-bit mono
+
+// Rate limit: пауза между последовательными запросами (мс)
+const REQUEST_DELAY_MS = 3000 // 3с → max 20 RPM (лимит Groq free)
+
+// Retry при 429
+const MAX_RETRIES = 2
+const RETRY_DELAY_MS = 4000 // 4с — Groq пишет "try again in 3s"
 
 // ─── Типы ────────────────────────────────────────────────────────────
 
@@ -54,6 +65,11 @@ let accumulatedTranscript: string = ''
 let lastTranscriptTime = 0
 
 // ─── Вспомогательные функции ─────────────────────────────────────────
+
+/** Пауза */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
 
 /**
  * Создаёт WAV-заголовок для PCM-данных.
@@ -93,7 +109,7 @@ function createWavBuffer(pcmData: Buffer, sampleRate: number, channels: number):
 
 /**
  * Отправляет аудио-чанк на Whisper API через Multipart Form Data.
- * Используем нативный fetch (Node.js 18+).
+ * С поддержкой retry при 429 (rate limit).
  */
 async function transcribeChunk(
   wavBuffer: Buffer,
@@ -151,44 +167,56 @@ async function transcribeChunk(
 
   const body = Buffer.concat(parts)
 
-  try {
-    // fetchWithFallback: сначала через прокси, если упал — автоматически напрямую
-    const response = await fetchWithFallback(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': `multipart/form-data; boundary=${boundary}`
-      },
-      body: new Uint8Array(body) // Uint8Array вместо Buffer для совместимости
-    })
+  // ─── Retry loop для 429 ───
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetchWithFallback(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': `multipart/form-data; boundary=${boundary}`
+        },
+        body: new Uint8Array(body)
+      })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      console.error(`[sttService] API error ${response.status}:`, errorText)
+      // 429 — rate limit: ждём и пробуем ещё
+      if (response.status === 429 && attempt < MAX_RETRIES) {
+        console.warn(`[sttService] Rate limit (429), retry ${attempt + 1}/${MAX_RETRIES} через ${RETRY_DELAY_MS}мс...`)
+        await sleep(RETRY_DELAY_MS)
+        continue
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text()
+        console.error(`[sttService] API error ${response.status}:`, errorText)
+        return null
+      }
+
+      const result = await response.json() as { text?: string }
+
+      if (!result.text || result.text.trim().length === 0) {
+        return null // Тишина или неразборчиво
+      }
+
+      return {
+        text: result.text.trim(),
+        source
+      }
+    } catch (err) {
+      console.error('[sttService] Ошибка транскрипции:', (err as Error).message)
       return null
     }
-
-    const result = await response.json() as { text?: string }
-
-    if (!result.text || result.text.trim().length === 0) {
-      return null // Тишина или неразборчиво
-    }
-
-    return {
-      text: result.text.trim(),
-      source
-    }
-  } catch (err) {
-    console.error('[sttService] Ошибка транскрипции:', (err as Error).message)
-    return null
   }
+
+  return null // Все попытки исчерпаны
 }
 
 // ─── Обработка очереди ───────────────────────────────────────────────
 
 /**
  * Обрабатывает очередь аудио-чанков.
- * Отправляет чанки по одному (последовательно, чтобы не превысить rate limit).
+ * Отправляет чанки по одному с паузой REQUEST_DELAY_MS между запросами,
+ * чтобы не превысить rate limit Groq (20 RPM).
  */
 async function processQueue(): Promise<void> {
   if (isProcessing || sttQueue.length === 0) return
@@ -225,6 +253,12 @@ async function processQueue(): Promise<void> {
       const speakerLabel = source === 'mic' ? '[Микрофон]' : '[Собеседник]'
       accumulatedTranscript += `${speakerLabel}: ${result.text}\n`
       lastTranscriptTime = Date.now()
+    }
+
+    // ─── Rate limit: пауза между запросами ───
+    // Groq free = 20 RPM → 3с между запросами
+    if (sttQueue.length > 0) {
+      await sleep(REQUEST_DELAY_MS)
     }
   }
 

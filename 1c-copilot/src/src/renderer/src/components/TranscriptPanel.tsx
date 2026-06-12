@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { TranscriptionUpdatePayload } from '@shared/ipc'
 
 type Line = TranscriptionUpdatePayload & { id: number }
@@ -8,35 +8,12 @@ let lineId = 0
 /**
  * TranscriptPanel — панель расшифровки речи.
  *
- * Использует DOM-based dynamic mouse passthrough:
- *   - По умолчанию: setIgnoreMouseEvents(true, {forward:true}) — клики проходят сквозь
- *   - Курсор наведён (DOM mouseenter): setIgnoreMouseEvents(false) — панель интерактивна
- *   - Курсор ушёл (DOM mouseleave): setIgnoreMouseEvents(true, {forward:true}) — снова click-through
+ * Окно расшифровки ВСЕГДА кликабельно и интерактивно
+ * (настроено в overlayWindow.ts — setIgnoreMouseEvents(false)).
+ * Пользователь может выделять текст, скроллить, нажимать кнопки.
  */
 export function TranscriptPanel() {
   const [lines, setLines] = useState<Line[]>([])
-  const rootRef = useRef<HTMLDivElement>(null)
-
-  // ─── DOM-based dynamic passthrough ───
-  useEffect(() => {
-    const el = rootRef.current
-    if (!el) return
-
-    const onMouseEnter = () => {
-      void window.copilot.window.setIgnoreMouseEvents(false)
-    }
-    const onMouseLeave = () => {
-      void window.copilot.window.setIgnoreMouseEvents(true, { forward: true })
-    }
-
-    el.addEventListener('mouseenter', onMouseEnter)
-    el.addEventListener('mouseleave', onMouseLeave)
-
-    return () => {
-      el.removeEventListener('mouseenter', onMouseEnter)
-      el.removeEventListener('mouseleave', onMouseLeave)
-    }
-  }, [])
 
   // ─── Подписка на транскрипцию ───
   useEffect(() => {
@@ -51,7 +28,7 @@ export function TranscriptPanel() {
   }, [])
 
   return (
-    <div ref={rootRef} className="transcript glass-panel">
+    <div className="transcript glass-panel">
       <header className="transcript-header">
         <span>Расшифровка</span>
         <button className="btn-ghost" onClick={() => window.copilot.transcription.clear()}>
@@ -65,7 +42,7 @@ export function TranscriptPanel() {
           lines.map((line) => (
             <div key={line.id} className="transcript-line glass-card">
               <span className="transcript-speaker">{line.speaker ?? '?'}</span>
-              <span>{line.text}</span>
+              <span className="transcript-text">{line.text}</span>
             </div>
           ))
         )}
@@ -110,6 +87,10 @@ export function TranscriptPanel() {
           font-weight: 600;
           text-transform: uppercase;
           font-size: 10px;
+        }
+        .transcript-text {
+          user-select: text;
+          cursor: text;
         }
       `}</style>
     </div>

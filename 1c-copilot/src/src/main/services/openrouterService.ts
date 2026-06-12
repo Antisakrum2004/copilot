@@ -81,13 +81,15 @@ export async function streamSuggestion(
   const model: string = getSetting('openRouterModel') || DEFAULT_MODEL
 
   if (!apiKey) {
-    console.warn('[openrouter] API ключ OpenRouter не задан')
+    console.warn('[openrouter] API ключ OpenRouter не задан — подсказки недоступны')
     broadcastSuggestion({
-      content: '⚠️ Задайте API ключ OpenRouter в настройках',
+      content: '⚠️ Задайте API ключ OpenRouter в настройках (⚙️ → OpenRouter Key)',
       streaming: false
     })
     return
   }
+
+  console.log(`[openrouter] Отправка запроса: модель=${model}, контекст=${contextText.length} символов`)
 
   // Если уже стримим — прерываем предыдущий запрос
   if (isStreaming) {
@@ -164,8 +166,9 @@ export async function streamSuggestion(
     let fullContent = ''
     let buffer = ''
 
-    // Отправляем начальный статус
-    broadcastSuggestion({ content: '', streaming: true })
+    // НЕ отправляем пустой статус стриминга — это показывает
+    // пустой "stream" бейдж и "Продолжение следует".
+    // Сначала дождёмся первого токена, потом обновим UI.
 
     while (true) {
       const { done, value } = await reader.read()
@@ -186,6 +189,7 @@ export async function streamSuggestion(
 
           if (token) {
             fullContent += token
+            // Отправляем обновление ТОЛЬКО когда есть контент
             broadcastSuggestion({
               content: fullContent,
               streaming: true
@@ -212,7 +216,12 @@ export async function streamSuggestion(
       }
     }
 
-    console.log(`[openrouter] Подсказка сгенерирована (${fullContent.length} символов)`)
+    if (fullContent) {
+      console.log(`[openrouter] Подсказка сгенерирована (${fullContent.length} символов)`)
+    } else {
+      console.warn('[openrouter] LLM вернул пустой ответ')
+      broadcastSuggestion({ content: '', streaming: false })
+    }
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       console.log('[openrouter] Запрос прерван пользователем')

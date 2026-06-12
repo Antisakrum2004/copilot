@@ -33,14 +33,15 @@ function baseOverlayOptions(
   const display = screen.getPrimaryDisplay()
   const { width: screenW } = display.workAreaSize
 
-  // Тулбар ДОЛЖЕН быть focusable на Windows — иначе
-  // -webkit-app-region: drag и клики по кнопкам не работают
+  // Тулбар и расшифровка ДОЛЖНЫ быть focusable и кликабельными
   const isToolbar = kind === 'toolbar'
+  const isTranscript = kind === 'transcript'
+  const isInteractive = isToolbar || isTranscript
 
-  // Для DEBAG: suggestion/transcript — тёмный непрозрачный фон + рамка,
-  // чтобы окна были ВИДНЫ сразу после запуска.
+  // Для DEBAG: suggestion — тёмный непрозрачный фон + рамка,
+  // чтобы окно было ВИДНО сразу после запуска.
   // После отладки вернуть transparent: true + backgroundColor: '#00000000'
-  const isDebugPanel = !isToolbar
+  const isDebugPanel = !isToolbar && !isTranscript
 
   return {
     width: size.width,
@@ -58,9 +59,9 @@ function baseOverlayOptions(
     closable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
-    focusable: isToolbar,
-    frame: isDebugPanel,       // suggestion/transcript: видимая рамка для дебага
-    transparent: !isDebugPanel, // suggestion/transcript: НЕ прозрачные
+    focusable: isInteractive,
+    frame: isDebugPanel,         // suggestion: видимая рамка для дебага
+    transparent: !isDebugPanel,  // suggestion: НЕ прозрачные
     hasShadow: isDebugPanel,
     backgroundColor: isDebugPanel ? '#14141e' : '#00000000',
     titleBarStyle: 'hidden',
@@ -94,26 +95,24 @@ export function createOverlayWindow(
 
   if (kind === 'toolbar') {
     // Тулбар ВСЕГДА кликабельный — мышь никогда не проходит сквозь.
-    //
-    // КРИТИЧЕСКИЙ ПОРЯДОК НА WINDOWS:
-    //   1. show() — активирует окно (НЕ showInactive!)
-    //   2. setIgnoreMouseEvents(false) — ПОСЛЕ show()
-    //
-    // showInactive() НЕ активирует окно, и на Windows это ломает
-    // -webkit-app-region: drag и клики по кнопкам.
     win.once('ready-to-show', () => {
       win.show()
       win.setIgnoreMouseEvents(false)
       console.log('[overlayWindow] Toolbar показан и кликабелен')
     })
+  } else if (kind === 'transcript') {
+    // Расшифровка — кликабельна и интерактивна всегда.
+    // Пользователь должен мочь выделять текст, скроллить, нажимать «Очистить».
+    win.setIgnoreMouseEvents(false)
+
+    win.once('ready-to-show', () => {
+      win.showInactive()
+      console.log('[overlayWindow] Transcript показан и кликабелен')
+    })
   } else {
-    // suggestion / transcript — прозрачны для кликов по умолчанию,
+    // suggestion — прозрачен для кликов по умолчанию,
     // чтобы не мешать работать в 1С.
-    //
-    // ВАЖНО: BrowserWindow-события mouseenter/mouseleave НЕ работают
-    // на Windows при setIgnoreMouseEvents(true). Поэтому динамическое
-    // переключение делается через DOM-события в renderer-процессе
-    // (см. SuggestionPanel.tsx, TranscriptPanel.tsx).
+    // Динамическое переключение через DOM-события (SuggestionPanel.tsx).
     win.setIgnoreMouseEvents(true, { forward: true })
 
     win.once('ready-to-show', () => {
