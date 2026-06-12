@@ -2,7 +2,7 @@
 
 ## ГЛАВНАЯ ЛОВУШКА
 
-**Whisper API не принимает raw PCM.** Нужно обязательно оборачивать PCM-данные в WAV-заголовок (44 байта). Без этого API возвращает ошибку формата. В sttService.ts реализована функция `createWavBuffer()`, которая добавляет RIFF/WAVE заголовок к PCM-данным.
+**Whisper API не принимает raw PCM.** Нужно обязательно оборачивать PCM-данные в WAV-заголовок (44 байта). Без этого API возвращает ошибку формата. В sttService.ts реализована функция `createWavBuffer()`, которая добавляет RIFF/WAVE заголовок к PCM-данным. Это было выяснено на ранних этапах — отправка raw PCM стабильно возвращает HTTP 400 от обоих провайдеров (Groq и OpenAI).
 
 ## Groq Whisper API
 
@@ -46,17 +46,17 @@ json
 
 ### Ловушки Groq
 
-1. **Rate limit**: 30 запросов/мин на бесплатном плане. При 6-секундных чанках и двух потоках (mic + system) = до 20 запросов/мин — в пределах лимита, но впритык.
+1. **Rate limit**: 30 запросов/мин на бесплатном плане. При 6-секундных чанках и двух потоках (mic + system) = до 20 запросов/мин — в пределах лимита, но впритык. Если добавить третий поток или укоротить чанки — легко превысить.
 2. **Размер файла**: максимум 25 МБ. 6-секундный чанк при 16kHz 16-bit mono = ~192KB — далеко от лимита.
 3. **Формат файла**: принимает WAV, MP3, M4A, WEBM. Не принимает raw PCM!
 4. **Пустой ответ**: если в аудио тишина или неразборчивая речь, `text` может быть пустой строкой или отсутствовать. Код проверяет `result.text?.trim().length === 0`.
 5. **language**: параметр необязательный, но без него качество распознавания русской речи хуже. Жёстко зашит `"ru"`.
 6. **Модель**: `whisper-large-v3` — самая точная. `whisper-large-v3-turbo` — быстрее, но чуть хуже. `distil-whisper-large-v3-en` — ТОЛЬКО английский, НЕ использовать!
-7. **Multipart без библиотек**: код формирует multipart вручную через Buffer.concat — без form-data/npm зависимости. Это работает, но нужно точно соблюдать `\r\n` разделители и boundary-формат.
+7. **Multipart без библиотек**: код формирует multipart вручную через Buffer.concat — без form-data/npm зависимости. Это работает, но нужно точно соблюдать `\r\n` разделители и boundary-формат. Любая ошибка в разделителе — 400 от API.
 
 ### Минимальный размер чанка
 
-Whisper плохо распознаёт очень короткие фрагменты. В коде стоит `MIN_CHUNK_SIZE_BYTES = 32000` (~1 сек при 16kHz 16-bit). Чанки короче этого пропускаются.
+Whisper плохо распознаёт очень короткие фрагменты. В коде стоит `MIN_CHUNK_SIZE_BYTES = 32000` (~1 сек при 16kHz 16-bit). Чанки короче этого пропускаются. Это важно при посылке чанков из Renderer: если ScriptProcessorNode даёт маленькие буферы, ChunkBuffer в Main-процессе накапливает их до нужного размера.
 
 ---
 
@@ -103,6 +103,8 @@ X-Title: 1C-Copilot
   "model": "qwen/qwen-2.5-coder-32b-instruct",
   "messages": [
     {"role": "system", "content": "...системный промпт 1С..."},
+    {"role": "assistant", "content": "предыдущая подсказка 1"},
+    {"role": "assistant", "content": "предыдущая подсказка 2"},
     {"role": "user", "content": "Вот живой текст текущего созвона:\n\n...\n\nДай краткую техническую подсказку по 1С..."}
   ],
   "stream": true,
@@ -110,6 +112,8 @@ X-Title: 1C-Copilot
   "temperature": 0.4
 }
 ```
+
+**ВНИМАНИЕ**: Сейчас `suggestionHistory` хранит только `assistant` сообщения (до 3 штук), что нарушает формат OpenAI chat API (требуется чередование user/assistant). Это известный баг — см. `05-known-issues.md`.
 
 ### Формат SSE-ответа (streaming)
 ```
@@ -132,7 +136,7 @@ data: [DONE]
 6. **Rate limit**: зависит от кредитов на аккаунте. Бесплатные модели — очень медленные.
 7. **max_tokens: 1024**: ограничение длины подсказки. Для кратких 1С-подсказок этого хватает. Если подсказка обрезается — увеличить.
 8. **temperature: 0.4**: низкая температура для детерминированных технических подсказок. Выше 0.7 — начинает «фантазировать».
-9. **История**: хранятся последние 3 подсказки (suggestionHistory) для контекста. Добавляются в messages перед текущим user-сообщением.
+9. **История**: хранятся последние 3 подсказки (suggestionHistory) для контекста. Добавляются в messages перед текущим user-сообщением. **БАГ**: нет user-сообщений в истории, только assistant.
 
 ### Автоматическая отправка
 
@@ -148,7 +152,8 @@ data: [DONE]
 
 | Данные | Формат | Где |
 |--------|--------|-----|
-| Аудио чанк (внутренний) | 16kHz Mono 16-bit PCM LE, Buffer | audioCapture → sttService |
+| Аудио чанк (Renderer→Main) | ArrayBuffer (Int16 PCM) | useMicCapture → IPC `audio:sendMicChunk` |
+| Аудио чанк (внутренний) | Buffer (16kHz Mono 16-bit PCM LE) | audioCapture ChunkBuffer → sttService |
 | Аудио чанк (API) | WAV (PCM + 44-байт заголовок) | sttService → Whisper API |
 | STT результат | JSON `{text: string}` | Whisper API → sttService |
 | IPC транскрипция | `{text, speaker, isFinal, timestamp}` | sttService → renderer |
@@ -157,22 +162,21 @@ data: [DONE]
 | LLM запрос | JSON OpenAI-compatible | openrouterService → OpenRouter |
 | LLM ответ | SSE (text/event-stream) | OpenRouter → openrouterService |
 
-## Пагинация
+## getUserMedia (Renderer-сторона)
 
-Whisper API и OpenRouter API не используют пагинацию — это запрос-ответные API. STT отправляет чанки последовательно (не параллельно), чтобы не превысить rate limit Groq.
+Это не «внешний API» в классическом смысле, но имеет свои ловушки:
+
+1. **AudioContext sampleRate**: При создании `new AudioContext({ sampleRate: 16000 })` браузер может не поддерживать ровно 16kHz — в этом случае используется ближайшее поддерживаемое. В Chromium/Electron обычно поддерживается.
+2. **ScriptProcessorNode deprecated**: Официально устарел в пользу AudioWorkletNode, но пока работает. Если перестанет — нужна миграция на AudioWorklet.
+3. **Echo cancellation**: Включена по умолчанию в constraints (`echoCancellation: true`), что может вызвать артефакты если пользователь не в наушниках.
+4. **Permission dialog**: Первый вызов getUserMedia показывает системный диалог разрешения. Если пользователь откажет — микрофон не будет захвачен, приложение должно корректно обработать это.
+5. **IPC serialization**: ArrayBuffer из ScriptProcessorNode отправляется через IPC как есть. Electron сериализует ArrayBuffer через structured clone — это работает, но каждый чанк ~8KB (4096 float32 сэмплов) создаёт нагрузку на IPC.
 
 ## Исключения
 
 1. **Linux системный звук**: ffmpeg fallback использует `alsa default`, что может захватить микрофон вместо системного звука. Нужен PulseAudio loopback.
 2. **macOS системный звук**: требуется виртуальный аудио-драйвер (BlackHole / Soundflower). Без него ffmpeg fallback не захватит системный звук.
 3. **whisper-large-v3-turbo**: не поддерживает русский язык так же хорошо как whisper-large-v3.
-
-## Вебхуки/токены
-
-Проект не использует вебхуки. Все API-вызовы — исходящие (pull). Токены хранятся в electron-store:
-- `openRouterApiKey` — ключ OpenRouter
-- `sttApiKey` — ключ Groq или OpenAI
-- `sttProvider` — выбор провайдера (`"groq"` или `"openai"`)
 
 ## Хранилище
 

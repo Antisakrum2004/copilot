@@ -1,10 +1,9 @@
 {
   "project": "1C-Copilot",
-  "version": "v0.0.1-alpha (Аудит и реанимация)",
-  "last_updated": "2026-06-11",
-  "prod": "N/A — проект не собирается",
+  "version": "V1.0.0",
+  "last_updated": "2026-06-12",
   "repo": "https://github.com/Antisakrum2004/copilot",
-  "stack": "Electron 31 + React 18 + TypeScript 5.7 + electron-vite 2.3 + electron-store 8.2",
+  "stack": "Electron 31 + electron-vite 2.3 + TypeScript 5.7 + React 18 + Web Audio API + FFmpeg (WASAPI system-only)",
   "critical_first": {
     "api_quirks": "02-api-quirks.md",
     "coding_rules": "08-coding-rules.md",
@@ -14,8 +13,8 @@
     {
       "file": "01-overview.md",
       "title": "Обзор проекта",
-      "topics": ["архитектура", "стек", "поток данных", "зависимости"],
-      "keywords": ["Electron", "React", "overlay", "WASAPI", "Whisper", "OpenRouter"]
+      "topics": ["архитектура", "стек", "поток данных", "getUserMedia", "WASAPI"],
+      "keywords": ["Electron", "React", "overlay", "getUserMedia", "WASAPI", "Whisper", "OpenRouter"]
     },
     {
       "file": "02-api-quirks.md",
@@ -26,148 +25,151 @@
     {
       "file": "03-modules.md",
       "title": "Модули проекта",
-      "topics": ["файлы", "функции", "связи", "IPC"],
-      "keywords": ["audioCapture", "sttService", "openrouterService", "handlers", "overlayWindow"]
+      "topics": ["файлы", "функции", "связи", "IPC", "useMicCapture"],
+      "keywords": ["audioCapture", "sttService", "openrouterService", "handlers", "overlayWindow", "useMicCapture"]
     },
     {
       "file": "04-current-state.md",
       "title": "Текущее состояние",
-      "topics": ["версии", "реализовано", "не реализовано", "история"],
-      "keywords": ["v0.0.1-alpha", "не собирается", "UNMET", "мёртвый код"]
+      "topics": ["версии", "реализовано", "не реализовано", "история миграций"],
+      "keywords": ["V1.0.0", "getUserMedia", "build OK", "5 typecheck errors"]
     },
     {
       "file": "05-known-issues.md",
       "title": "Известные проблемы и техдолг",
-      "topics": ["баги", "ограничения", "техдолг", "блокирующие проблемы"],
-      "keywords": ["WASAPI dead code", "UNMET", "tsconfig", "ffmpeg zombie"]
+      "topics": ["баги", "typecheck", "ложный spawn", "дубли транскрипции", "кириллица"],
+      "keywords": ["TS2304", "useState", "spawn false-positive", "systemChunkBuf", "broadcastTranscription"]
     },
     {
       "file": "06-attempts-failures.md",
       "title": "Что НЕ сработало",
-      "topics": ["провалы", "ошибки", "обходные пути"],
-      "keywords": ["Stereo Mix", "BlackHole", "native module", "raw PCM"]
+      "topics": ["ffmpeg dshow микрофон", "кириллица", "dummy устройства", "Web Audio system"],
+      "keywords": ["dshow", "кракозябры", "DirectShow", "getUserMedia migration"]
     },
     {
       "file": "07-decisions.md",
       "title": "Решения и обоснования",
-      "topics": ["архитектурные решения", "альтернативы", "обоснования"],
-      "keywords": ["overlay", "streaming", "chunk size", "context window"]
+      "topics": ["getUserMedia", "WASAPI isolation", "overlay", "chunk size", "streaming"],
+      "keywords": ["Renderer mic", "try/catch WASAPI", "overlay trick", "context window"]
     },
     {
       "file": "08-coding-rules.md",
       "title": "Как писать код",
-      "topics": ["стиль", "конвенции", "API", "CSS", "принципы"],
-      "keywords": ["TypeScript", "IPC", "electron-store", "preload", "contextBridge"]
+      "topics": ["стиль", "конвенции", "PCM формат", "IPC", "overlay"],
+      "keywords": ["TypeScript", "PCM 16kHz", "IPC", "electron-store", "preload", "contextBridge"]
     },
     {
       "file": "09-next-steps.md",
       "title": "Следующие шаги",
-      "topics": ["приоритеты", "задачи", "баги", "фичи"],
-      "keywords": ["npm install", "tsconfig", "WASAPI fix", "первый запуск"]
+      "topics": ["приоритеты", "typecheck", "getUserMedia", "runtime", "Windows GUI"],
+      "keywords": ["TS errors", "useMicCapture", "overlay debug", "first run"]
     }
   ],
   "files": {
     "src/main/index.ts": {
       "path": "src/main/index.ts",
-      "lines": 33,
-      "size_kb": 0.8,
-      "role": "Точка входа Electron main-процесса. БАГ: cleanup() не зарегистрирован."
+      "lines": 41,
+      "size_kb": 1.1,
+      "role": "Точка входа Electron main-процесса. Single-instance lock, cleanup на before-quit."
     },
     "src/main/ipc/handlers.ts": {
       "path": "src/main/ipc/handlers.ts",
-      "lines": 341,
-      "size_kb": 11.1,
-      "role": "IPC-обработчики. Написаны, подключены. Мелкие проблемы с хардкод-строками."
+      "lines": 378,
+      "size_kb": 13.0,
+      "role": "Центральный IPC-реестр. 30+ обработчиков, пайплайн audio→STT→LLM."
     },
     "src/main/store/settings.ts": {
       "path": "src/main/store/settings.ts",
       "lines": 23,
       "size_kb": 0.6,
-      "role": "electron-store обёртка. Выглядит рабочей."
+      "role": "electron-store обёртка. CRUD настроек."
     },
     "src/main/windows/overlayWindow.ts": {
       "path": "src/main/windows/overlayWindow.ts",
-      "lines": 105,
-      "size_kb": 3.0,
-      "role": "Фабрика overlay-окон. Выглядит рабочей."
+      "lines": 144,
+      "size_kb": 4.5,
+      "role": "Фабрика overlay-окон. 3 окна: toolbar/suggestion/transcript. Debug-режим: непрозрачные с рамкой."
     },
     "src/main/services/audioCapture.ts": {
       "path": "src/main/services/audioCapture.ts",
-      "lines": 424,
-      "size_kb": 14.5,
-      "role": "Аудио-захват. КРИТИЧЕСКИЙ БАГ: WASAPI — мёртвый код. startCapture() всегда true. ffmpeg process не сохраняется."
-    },
-    "src/main/services/openrouterService.ts": {
-      "path": "src/main/services/openrouterService.ts",
-      "lines": 292,
-      "size_kb": 11.4,
-      "role": "OpenRouter стриминг. БАГ: suggestionHistory без user-пар. Не тестировалось."
+      "lines": 552,
+      "size_kb": 18.0,
+      "role": "Аудио-захват. Микрофон → Renderer getUserMedia (IPC чанки). Системный звук → WASAPI/ffmpeg (Main). ChunkBuffer 6s."
     },
     "src/main/services/sttService.ts": {
       "path": "src/main/services/sttService.ts",
-      "lines": 307,
-      "size_kb": 10.1,
-      "role": "STT сервис. БАГ: дублирующая отправка, fetch с Buffer. Не тестировалось."
+      "lines": 308,
+      "size_kb": 10.5,
+      "role": "STT очередь → Groq/OpenAI Whisper API. БАГ: дубли в broadcastTranscription."
+    },
+    "src/main/services/openrouterService.ts": {
+      "path": "src/main/services/openrouterService.ts",
+      "lines": 293,
+      "size_kb": 11.6,
+      "role": "OpenRouter SSE стриминг. БАГ: suggestionHistory без user-пар."
     },
     "src/shared/ipc.ts": {
       "path": "src/shared/ipc.ts",
-      "lines": 94,
-      "size_kb": 2.7,
-      "role": "IPC-каналы и типы. Выглядит корректным."
+      "lines": 101,
+      "size_kb": 3.0,
+      "role": "IPC-каналы, типы, DEFAULT_SETTINGS. 30+ каналов в 5 группах."
     },
     "src/preload/index.ts": {
       "path": "src/preload/index.ts",
-      "lines": 132,
-      "size_kb": 5.9,
-      "role": "Preload-скрипт, contextBridge. Выглядит корректным."
+      "lines": 142,
+      "size_kb": 6.2,
+      "role": "Preload: contextBridge.exposeInMainWorld('copilot'). 5 namespace API."
     },
     "src/renderer/src/App.tsx": {
       "path": "src/renderer/src/App.tsx",
-      "lines": 56,
-      "size_kb": 1.8,
-      "role": "Hash-based роутер. Выглядит рабочим."
+      "lines": 62,
+      "size_kb": 2.0,
+      "role": "Hash-роутер + toggleRecording. useMicCapture() на top level."
     },
-    "src/renderer/src/components/SettingsPanel.tsx": {
-      "path": "src/renderer/src/components/SettingsPanel.tsx",
-      "lines": 182,
-      "size_kb": 5.2,
-      "role": "Панель настроек. Выглядит рабочей."
+    "src/renderer/src/hooks/useMicCapture.ts": {
+      "path": "src/renderer/src/hooks/useMicCapture.ts",
+      "lines": 142,
+      "size_kb": 4.8,
+      "role": "getUserMedia → AudioContext(16kHz) → ScriptProcessorNode → Float32→Int16 PCM → IPC."
     },
     "src/renderer/src/components/Toolbar.tsx": {
       "path": "src/renderer/src/components/Toolbar.tsx",
-      "lines": 94,
-      "size_kb": 3.1,
-      "role": "Тулбар. Выглядит рабочим."
+      "lines": 79,
+      "size_kb": 2.5,
+      "role": "Тулбар: Слушать/Стоп, Подсказки, Текст, Настройки. -webkit-app-region: drag."
     },
     "src/renderer/src/components/SuggestionPanel.tsx": {
       "path": "src/renderer/src/components/SuggestionPanel.tsx",
-      "lines": 102,
-      "size_kb": 3.3,
-      "role": "Панель подсказок. Нет Markdown-рендеринга."
+      "lines": 138,
+      "size_kb": 4.0,
+      "role": "Панель подсказок. БАГ: нет import useState. Нет Markdown-рендеринга."
     },
     "src/renderer/src/components/TranscriptPanel.tsx": {
       "path": "src/renderer/src/components/TranscriptPanel.tsx",
-      "lines": 86,
-      "size_kb": 2.6,
-      "role": "Панель расшифровки. Выглядит рабочей."
+      "lines": 118,
+      "size_kb": 3.5,
+      "role": "Панель расшифровки. БАГ: нет import useState."
+    },
+    "src/renderer/src/components/SettingsPanel.tsx": {
+      "path": "src/renderer/src/components/SettingsPanel.tsx",
+      "lines": 183,
+      "size_kb": 5.5,
+      "role": "Панель настроек: API ключи, модель, провайдер, opacity/width."
     }
   },
   "quick_facts": {
-    "CRITICAL_project_cannot_build": "ВСЕ 12 зависимостей UNMET. npm install НИ РАЗУ не выполнялся. Проект не компилируется.",
-    "CRITICAL_missing_configs": "tsconfig.node.json и tsconfig.web.json не существуют — на которые ссылается tsconfig.json",
-    "CRITICAL_waspai_dead_code": "audioCapture.ts: WASAPI loopback — МЁРТВЫЙ КОД. loadNativeLoopback() никогда не вызывается из-за chicken-and-egg бага",
-    "CRITICAL_startCapture_always_true": "startCapture() всегда возвращает true даже если ffmpeg не запустился",
-    "CRITICAL_ffmpeg_zombie": "ffmpeg child process не сохраняется в переменную — нельзя убить при stopCapture()",
-    "CRITICAL_cleanup_not_registered": "cleanup() определена в handlers.ts но НЕ зарегистрирована в app.on('before-quit')",
-    "BUG_stt_duplicate_broadcast": "sttService.ts broadcastTranscription отправляет сообщения дважды в одно окно",
-    "BUG_suggestion_history_format": "openrouterService.ts suggestionHistory хранит только assistant — нарушает формат OpenAI chat",
-    "platform_target": "Windows (основной), macOS и Linux — fallback через ffmpeg",
-    "audio_format": "16kHz Mono 16-bit PCM LE, чанки по 6 секунд (192 000 байт)",
+    "audio_format_target": "PCM 16000Hz, 1 channel, 16-bit (s16le)",
+    "mic_capture_strategy": "Renderer-side via navigator.mediaDevices.getUserMedia (Chromium AudioContext + ScriptProcessorNode)",
+    "system_capture_strategy": "Main-side via WinAudioCapture (WASAPI Loopback), fallback ffmpeg dshow/avfoundation/alsa",
+    "overlay_trick": "Clickthrough windows via #02000000 background color + setIgnoreMouseEvents(true, {forward: true}) + mouseenter/mouseleave toggle",
+    "ipc_bridge": "contextBridge.exposeInMainWorld('copilot') → window.copilot.audio.sendMicChunk(ArrayBuffer) → ipcRenderer.send → ipcMain.on",
+    "chunk_size": "6 seconds = 192 000 bytes (16000 Hz × 16 bit × 1 ch × 6 s)",
     "whisper_model_groq": "whisper-large-v3",
+    "whisper_model_openai": "whisper-1",
     "openrouter_default_model": "qwen/qwen-2.5-coder-32b-instruct",
-    "overlay_windows": "3 окна: toolbar (360x64), suggestion (420x320), transcript (380x420)",
-    "stt_language": "ru (зашил в sttService)",
-    "system_prompt_1c": "Зашил в openrouterService.ts — эксперт по 1С:Предприятие 8",
-    "first_step_to_code": "1. Создать tsconfig.node.json + tsconfig.web.json → 2. npm install → 3. electron-vite build → 4. Исправить WASAPI dead code → 5. Первый запуск"
+    "stt_language": "ru (hardcoded in sttService.ts)",
+    "overlay_windows": "3 окна: toolbar (360×64), suggestion (420×320), transcript (380×420)",
+    "build_status": "electron-vite build: OK (main+preload+renderer)",
+    "typecheck_status": "5 ошибок TS: 3× useState не импортирован, 2× default import React"
   }
 }
