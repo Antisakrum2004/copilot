@@ -31,13 +31,25 @@ if (!gotLock) {
       proxyRules: 'http://153.80.159.108:64218'
     })
 
-    // Навешиваем авторизацию прямо на сессию
-    session.defaultSession.on('login', (event, _details, authInfo, callback) => {
+    // Навешиваем авторизацию прямо на сессию (исправлена сигнатура: добавлен webContents)
+    session.defaultSession.on('login', (event, _webContents, _details, authInfo, callback) => {
       if (authInfo.isProxy) {
         event.preventDefault()
         callback('jRUfBEhc', 'YCkn2DPH')
       }
     })
+
+    // Прогрев кэша прокси для обхода бага net.fetch (Electron #44249)
+    const proxyWarmup = new BrowserWindow({ show: false })
+    proxyWarmup.loadURL('https://www.google.com/favicon.ico').catch(() => {})
+
+    const closeWarmup = () => {
+      if (!proxyWarmup.isDestroyed()) proxyWarmup.destroy()
+    }
+    // Закрываем как только получили ответ или упали, либо по защитному таймауту
+    proxyWarmup.webContents.once('did-finish-load', closeWarmup)
+    proxyWarmup.webContents.once('did-fail-load', closeWarmup)
+    setTimeout(closeWarmup, 3000)
 
     const preloadPath = join(__dirname, '../preload/index.js')
     registerIpcHandlers()
