@@ -1,4 +1,4 @@
-# 1C-Copilot — Memory Bank (V1.2.0, обновлено 2026-06-13)
+# 1C-Copilot — Memory Bank (V1.3.0, обновлено 2026-06-13)
 
 ---
 
@@ -20,10 +20,11 @@
 | Системный звук (Windows) | win-audio-capture | 1.0.1 (WASAPI Loopback) |
 | Системный звук (fallback) | ffmpeg | dshow / avfoundation / alsa |
 | STT | Groq / OpenAI Whisper API | whisper-large-v3 / whisper-1 |
-| LLM | OpenRouter API | google/gemini-2.0-flash-001 |
-| Прокси | undici ProxyAgent | Node.js native fetch через HTTP прокси |
+| LLM | OpenRouter API | google/gemini-2.5-flash |
+| Прокси (STT) | undici ProxyAgent | Node.js native fetch через HTTP прокси |
+| Прокси (LLM) | Electron session proxy | net.request через Chromium stack |
 
-### Архитектура
+### Архитектура (ДВОЙНАЯ ПРОКСИ)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -44,7 +45,21 @@
 │                                        → enqueueChunk()           │
 │                                        → sttService (Whisper API) │
 │                                        → openrouterService (SSE)  │
-│  Прокси: undici ProxyAgent → Node.js fetch (НЕ Chromium net.fetch)│
+│                                                                    │
+│  ДВОЙНОЙ ПРОКСИ:                                                   │
+│  ┌──────────────────────────────┐ ┌──────────────────────────────┐ │
+│  │ sttService → Groq Whisper    │ │ openrouterService → OpenRouter│ │
+│  │ Node.js fetch                │ │ Electron net.request          │ │
+│  │ undici ProxyAgent            │ │ session.setProxy + .on(login) │ │
+│  │ (credentials в URL)          │ │ (Chromium network stack)      │ │
+│  └──────────────────────────────┘ └──────────────────────────────┘ │
+│                                                                    │
+│  ФИЛЬТРАЦИЯ:                                                       │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Silence Gate (амплинтуда < 1200/32768) → отсекает тишину    │  │
+│  │ Hallucination Filter → отсекает галлюцинации Whisper         │  │
+│  │ Rate Limit (3с пауза + retry 429) → защита от rate limit    │  │
+│  └──────────────────────────────────────────────────────────────┘  │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -55,9 +70,10 @@
 3. Main: `handleMicChunkFromRenderer()` → `ChunkBuffer('mic')`
 4. Main: WASAPI/ffmpeg → `ChunkBuffer('system')`
 5. ChunkBuffer'ы накапливают 6с (192 000 байт) → `chunkCallback` → `enqueueChunk()`
-6. sttService: Silence Gate → PCM → WAV (44 байта заголовок) → multipart/form-data → Groq/OpenAI Whisper
-7. Результат → `transcription:update` IPC → TranscriptPanel
-8. При паузе 2с → `triggerAutoSuggestion()` → OpenRouter SSE → `suggestion:update-content` → SuggestionPanel
+6. sttService: **Silence Gate** (амплинтуда < 1200) → PCM → WAV → multipart/form-data → Groq/OpenAI Whisper
+7. **Hallucination Filter**: проверяет текст на типичные галлюцинации Whisper → отбрасывает мусор
+8. Результат → `transcription:update` IPC → TranscriptPanel
+9. При паузе 2с → `triggerAutoSuggestion()` → OpenRouter SSE через **net.request** → `suggestion:update-content` → SuggestionPanel
 
 ---
 
@@ -74,7 +90,7 @@
 | **STT/LLM бэкенд** | gRPC сервер `api.shadowhint.com:9000` — вся обработка на сервере | Прямые HTTP-запросы к Groq/OpenRouter из Main-процесса |
 | **Аудио-протокол** | gRPC bidirectional streaming (`StreamAudio`) — чанки летят потоком, сервер сам решает когда транскрибировать | HTTP multipart POST каждого 6с чанка по очереди |
 | **STT провайдер** | Deepgram (основной) + Groq (фолбэк) — выбор через `sttProvider` настройку | Только Groq/OpenAI Whisper |
-| **VAD (Voice Activity Detection)** | Серверный (`vadMode`, `maxSpeechSeconds` — настройки) | Клиентский Silence Gate (порог амплитуды < 400) |
+| **VAD (Voice Activity Detection)** | Серверный (`vadMode`, `maxSpeechSeconds` — настройки) | Клиентский Silence Gate (порог амплитуды < 1200) + Hallucination Filter |
 | **Системный звук** | 3 метода: `electron-audio-loopback` (macOS/Linux), `process-loopback` (Win native addon, исключает свой процесс!), `naudiodon` (фолбэк) | `win-audio-capture` (WASAPI) + ffmpeg fallback |
 | **Аудио-сжатие** | Opus (через `opusscript`) для Deepgram; PCM только для Groq | Только PCM (16kHz mono 16-bit) |
 | **Аутентификация** | OAuth2 через сервер (email + код, browser auth) | API-ключи в настройках (electron-store) |
@@ -107,9 +123,9 @@
 
 **Что делать**: Добавить `electron-audio-loopback` для кроссплатформенного loopback.
 
-#### 3. 🔴 Серверная VAD вместо клиентского Silence Gate
+#### 3. 🟡 Серверная VAD вместо клиентского Silence Gate
 
-**Проблема**: Наш Silence Gate (амплитуда < 400) — грубый эвристика. Он может:
+**Проблема**: Наш Silence Gate (амплитуда < 1200) — грубая эвристика. Он может:
 - Пропустить тихую речь (шёпот)
 - Отсечь начало/конец фразы
 - Не распознать шум вентилятора как тишину
@@ -157,8 +173,8 @@
 
 1. **Простота**: Наш проект — 7 файлов в Main. ShadowHint — 3.5MB минифицированного webpack-бандла. Мы можем изменять код за минуты.
 2. **Автономность**: Работает без сервера. ShadowHint мёртв без `api.shadowhint.com:9000`.
-3. **Прокси**: undici ProxyAgent — проверенное решение для прокси-авторизации. ShadowHint, судя по коду, не работает через корпоративные прокси.
-4. **Silence Gate**: У нас уже есть! У ShadowHint VAD серверный, но в клиенте нет защиты от отправки тишины.
+3. **Прокси**: Двойная прокси-архитектура (undici + session proxy). ShadowHint, судя по коду, не работает через корпоративные прокси.
+4. **Silence Gate + Hallucination Filter**: Двойная защита от мусора. У ShadowHint VAD серверный, но в клиенте нет защиты от отправки тишины.
 
 ---
 
@@ -172,17 +188,20 @@
 - Rate limit: 30 запросов/мин (два потока = 20/мин — впритык)
 - Min chunk: 32000 байт (~1 сек), max: 25 МБ
 - Multipart вручную через Buffer.concat (НЕ npm form-data)
+- **Через прокси**: Node.js fetch + undici ProxyAgent
 
 ### OpenAI Whisper API
 - `POST https://api.openai.com/v1/audio/transcriptions`
 - Ключ `sk_...`, модель `whisper-1`, платный ($0.006/мин)
+- **Через прокси**: Node.js fetch + undici ProxyAgent
 
 ### OpenRouter API
 - `POST https://openrouter.ai/api/v1/chat/completions`
 - Ключ `sk-or-v1-...`, заголовки `HTTP-Referer` + `X-Title` обязательны
 - `stream: true` → SSE, `data: [DONE]` — конец, `delta.content` — токены
 - SSE режет JSON — буферизация: `buffer = lines.pop()`
-- **БАГ**: suggestionHistory только assistant — нарушает формат chat
+- **Через прокси**: Electron `net.request` + `session.setProxy` + `session.on('login')`
+- **Модель**: `google/gemini-2.5-flash`
 
 ### getUserMedia (Renderer)
 - `AudioContext({sampleRate: 16000})` — обычно поддерживается, но может не ровно 16kHz
@@ -190,12 +209,23 @@
 - Первый вызов показывает диалог разрешения
 - IPC serialization: ~8KB на чанк (4096 float32 сэмплов)
 
-### Прокси (undici)
-- **НЕ используем Chromium net.fetch** — баг Electron #44249: `net.fetch` не триггерит `session.on('login')` для прокси-авторизации
-- Прогрев через BrowserWindow тоже НЕ помог — туннель падает до этапа авторизации
-- **Решение**: `undici.ProxyAgent` + `setGlobalDispatcher` → Node.js native `fetch` идёт через прокси
-- Credentials встроены в URL: `http://user:pass@host:port`
-- НЕ нужно `session.setProxy`, НЕ нужен `session.on('login')`, НЕ нужен warmup BrowserWindow
+### Прокси — ДВОЙНАЯ АРХИТЕКТУРА
+
+**Прокси-сервер**: `http://jRUfBEhc:YCkn2DPH@153.80.159.108:64218`
+
+| Сервис | Прокси-метод | Почему |
+|--------|-------------|--------|
+| sttService → Groq Whisper | `undici ProxyAgent` + `setGlobalDispatcher` | Node.js fetch через ProxyAgent — работает с multipart/form-data (бинарные WAV) |
+| openrouterService → OpenRouter SSE | `session.setProxy` + `session.on('login')` + `net.request` | Chromium network stack — надёжный SSE-стриминг через прокси-туннель |
+
+**Почему sttService НЕ использует net.request**: net.request не поддерживает отправку Buffer/Uint8Array body для multipart/form-data — только строковый JSON. Whisper API требует multipart с бинарным WAV-файлом.
+
+**Почему openrouterService НЕ использует Node.js fetch**: Node.js fetch игнорирует настройки прокси Electron сессии. SSE-стриминг через undici ProxyAgent может терять данные при прокси-туннелировании. net.request использует Chromium stack, который лучше справляется с long-lived streaming connections.
+
+**Критические баги Electron с прокси**:
+- **Electron #44249**: `net.fetch` НЕ триггерит `session.on('login')` для прокси-авторизации. Туннель падает с ERR_TUNNEL_CONNECTION_FAILED.
+- `net.request` — ДРУГОЙ API, НЕ имеет бага #44249. Использует Chromium network stack полностью.
+- `proxyRules` ФОРМАТ: `http=host:port;https=host:port` (НЕ просто `host:port` — иначе HTTPS CONNECT может не создаться)
 
 ---
 
@@ -205,12 +235,12 @@
 
 | Файл | Строки | Роль |
 |------|--------|------|
-| `index.ts` | 67 | Точка входа. Single-instance lock, undici ProxyAgent, cleanup на before-quit |
+| `index.ts` | 80 | Точка входа. Single-instance lock, двойная прокси-инициализация, diagnostics |
 | `ipc/handlers.ts` | 378 | 30+ IPC обработчиков. Пайплайн audio→STT→LLM |
 | `services/audioCapture.ts` | 552 | Mic: IPC от Renderer. System: WASAPI/ffmpeg. ChunkBuffer 6с |
-| `services/sttService.ts` | 369 | Очередь → Silence Gate → Whisper API. Rate limit + retry |
-| `services/openrouterService.ts` | 298 | SSE streaming. Модель: gemini-2.0-flash-001 |
-| `services/proxyFetch.ts` | 137 | undici ProxyAgent + fallback на direct |
+| `services/sttService.ts` | 397 | Очередь → Silence Gate → Hallucination Filter → Whisper API. Rate limit + retry |
+| `services/openrouterService.ts` | 335 | net.request SSE streaming. Модель: gemini-2.5-flash |
+| `services/proxyFetch.ts` | 220 | Двойная прокси: undici ProxyAgent + session proxy + testSessionProxy |
 | `store/settings.ts` | 23 | electron-store CRUD |
 | `windows/overlayWindow.ts` | 144 | Фабрика 3 окон. Debug: непрозрачные #14141e |
 
@@ -236,22 +266,24 @@
 
 ## 5. Текущее состояние
 
-**V1.2.0** — Проект собирается (`electron-vite build` OK). Аудио-пайплайн реорганизован: микрофон через getUserMedia в Renderer, системный звук через WASAPI в Main. Прокси переведён на `undici ProxyAgent` (вместо сломанного Chromium `net.fetch`). Silence Gate добавлен в sttService. Модель LLM изменена на Gemini Flash 2.0. Рантайм тестируется на Windows.
+**V1.3.0** — Двойная прокси-архитектура: undici ProxyAgent для STT (multipart), Electron session proxy + net.request для LLM (SSE). Silence Gate порог 1200. Hallucination Filter добавлен. Модель LLM gemini-2.5-flash. Диагностика testSessionProxy() при старте.
 
 ### Что РАБОТАЕТ
-- ✅ Прокси через undici ProxyAgent (подтверждено: HTTP 401 от api.groq.com)
-- ✅ Silence Gate в sttService (амплитуда < 400 → skip)
+- ✅ Прокси через undici ProxyAgent для STT (подтверждено: HTTP 401 от api.groq.com)
+- ✅ Silence Gate в sttService (амплитуда < 1200 → skip)
+- ✅ Hallucination Filter (отбрасывает «Продолжение следует», «Субтитры созданы» и пр.)
 - ✅ Rate limit: 3с пауза + retry при 429
-- ✅ SSE стриминг через fetchWithFallback (НЕ net.fetch)
+- ✅ SSE стриминг через net.request (Electron Chromium stack)
 - ✅ Транскрипция: микрофон → ChunkBuffer → Whisper → TranscriptPanel
 - ✅ Подсказки: пауза 2с → OpenRouter SSE → SuggestionPanel
 - ✅ TranscriptPanel кликабельный и resizable
-- ✅ Убран «Продолжение следует» (пустой broadcastSuggestion убран)
+- ✅ fetchWithFallback: авто-fallback прокси→direct при ошибке туннеля
 
-### Что НЕ РАБОТАЕТ / НУЖНО
+### Что НЕ РАБОТАЕТ / НУЖНО ПРОВЕРИТЬ
+- ❓ `net.request` через прокси — код написан, но НЕ ТЕСТИРОВАН на Windows (нужен git pull + запуск)
+- ❓ `testSessionProxy()` — добавлена диагностика, но результат неизвестен
 - ❌ `win-audio-capture` не исключает собственный процесс (эхо)
-- ❌ suggestionHistory без user-пар — нарушает формат chat
-- ❌ 5 ошибок TS (useState imports, React import)
+- ❌ suggestionHistory — исправлен (user/assistant пары), но не протестировано
 - ❌ Нет маскировки (Disguise)
 - ❌ Нет логирования в файл (Winston)
 
@@ -260,13 +292,12 @@
 ## 6. Известные проблемы и техдолг
 
 ### Критические
-1. **5 ошибок TS** — нет import useState в панелях, кривой import React
+1. **net.request через прокси — НЕ ПРОВЕРЕН** — код написан (session.setProxy + session.on('login') + net.request), но на Windows-машине всё ещё работает СТАРАЯ сборка (порог 400, нет Hallucination Filter). Нужен `git pull` + `npm run dev`.
 2. **Эхо системного звука** — win-audio-capture не исключает собственный процесс; нужен process-loopback
-3. **suggestionHistory без user-пар** — нарушает формат chat API
+3. **Electron #44249 для net.fetch** — РЕШЕНО переходом на net.request, но нужно подтвердить что session.on('login') работает с net.request
 
 ### Модульные
 - **audioCapture**: WASAPI sampleRate 44100 захардкожен, нет VAD (только Silence Gate в sttService)
-- **openrouterService**: suggestionHistory — только assistant-сообщения
 - **handlers**: 4 хардкод-строки IPC вместо констант
 - **Renderer**: нет Markdown-рендеринга, SettingsPanel пошаговое сохранение
 
@@ -275,7 +306,7 @@
 
 ---
 
-## 7. Что НЕ сработало
+## 7. Что НЕ сработало (хронология провалов)
 
 1. **ffmpeg dshow микрофон** — кириллица в именах устройств → кракозябры, dummy-устройства нестабильны, ложный spawn status. Решение: getUserMedia в Renderer.
 2. **Рекурсивный ffmpeg fallback** — CaptureCandidate + tryNextDevice() логически корректен, но фундаментальная проблема кодировки остаётся. Решение: полная миграция на getUserMedia.
@@ -286,9 +317,13 @@
 7. **Stereo Mix** — отключён по умолчанию на большинстве машин. Решение: WASAPI loopback.
 8. **app.commandLine.appendSwitch('proxy-server')** — ERR_TUNNEL_CONNECTION_FAILED, ломает HTTPS. Решение: session.setProxy без http:// префикса.
 9. **session.on('login') без webContents** — сдвиг параметров, authInfo.isProxy всегда false. Решение: правильная 5-аргументная сигнатура.
-10. **net.fetch + session.on('login')** (Electron #44249) — net.fetch НЕ триггерит login-событие, даже с правильной сигнатурой. Решение: undici ProxyAgent.
+10. **net.fetch + session.on('login')** (Electron #44249) — net.fetch НЕ триггерит login-событие, даже с правильной сигнатурой. Решение: undici ProxyAgent для fetch, net.request для SSE.
 11. **Proxy warmup через BrowserWindow** — прогрев не помог, потому что Chromium туннель падает ДО этапа авторизации (ERR_TUNNEL_CONNECTION_FAILED), login-событие никогда не вызывается. Решение: undici ProxyAgent.
 12. **globalThis.fetch = net.fetch** — ломал SSE-стриминг: ReadableStream.getReader() не работал с net.fetch response body. Решение: использовать стандартный Node.js fetch через undici ProxyAgent.
+13. **Silence Gate порог 400** — слишком низкий, аппаратные шумы микрофона (наводки 70-300) обходят gate и вызывают галлюцинации Whisper. Решение: порог 1200 + Hallucination Filter.
+14. **Пустой broadcastSuggestion** — вызывал «Продолжение следует» в UI. Решение: не отправлять пустые подсказки.
+15. **undici@8 несовместимость** — Electron 31 (Node 22.16) несовместим с undici@8. Решение: pin undici@7.
+16. **proxyRules без протокола** — `153.80.159.108:64218` не создавал HTTPS CONNECT-туннель для net.request. Решение: `http=host:port;https=host:port`.
 
 ---
 
@@ -302,11 +337,15 @@
 6. **6-секундные чанки** — баланс качества Whisper и задержки
 7. **Ручной multipart** — без зависимостей, полный контроль
 8. **Последовательная STT-очередь** — rate limit + порядок результатов
-9. **undici ProxyAgent вместо Chromium proxy** — net.fetch не поддерживает прокси-авторизацию (Electron #44249), Node.js fetch через ProxyAgent работает надёжно
-10. **Silence Gate (амплитуда < 400)** — предотвращает галлюцинации Whisper («Продолжение следует...»), экономит rate limit Groq
-11. **fetchWithFallback** — автоматический fallback с прокси на direct при ошибках туннеля
-12. **Gemini Flash 2.0 вместо Qwen Coder** — быстрее, умнее, дешевле
-13. **Debug overlay (#14141e)** — видимые окна для отладки на Windows-машине
+9. **undici ProxyAgent для STT** — net.fetch не поддерживает прокси-авторизацию (Electron #44249), Node.js fetch через ProxyAgent работает надёжно. Плюс multipart/form-data с бинарными WAV через ProxyAgent.
+10. **net.request для LLM** — использует Chromium network stack, поддерживает SSE через прокси-туннель, session.on('login') для авторизации
+11. **Silence Gate (амплитуда < 1200)** — предотвращает галлюцинации Whisper на тишине/шуме, экономит rate limit Groq
+12. **Hallucination Filter** — текстовый пост-фильтр после Whisper, отсекает типичные галлюцинации: «Продолжение следует», «Субтитры созданы сообществом» и др.
+13. **fetchWithFallback** — автоматический fallback с прокси на direct при ошибках туннеля
+14. **Gemini 2.5 Flash** — быстрее, умнее, дешевле чем Qwen Coder и Gemini 2.0 Flash
+15. **testSessionProxy()** — диагностика net.request через прокси при старте, показывает работает ли Chromium stack proxy
+16. **Debug overlay (#14141e)** — видимые окна для отладки на Windows-машине
+17. **proxyRules формат `http=host:port;https=host:port`** — явно указывает протоколы для создания CONNECT-туннелей
 
 ---
 
@@ -334,7 +373,7 @@ PCM 16000 Hz, 1 канал (моно), 16-bit (s16le)
 2. Fallback всегда (WASAPI→ffmpeg, Groq→OpenAI, network error→лог)
 3. Последовательность > параллельность (STT очередь)
 4. PCM 16kHz mono 16-bit — единый формат
-5. НЕ трогать globalThis.fetch — только undici ProxyAgent через setGlobalDispatcher
+5. ДВОЙНАЯ прокси: undici для fetch (STT), session proxy для net.request (LLM)
 
 ### Критические уроки
 1. НЕ отправляй raw PCM на Whisper — только WAV
@@ -345,20 +384,23 @@ PCM 16000 Hz, 1 канал (моно), 16-bit (s16le)
 6. НЕ парси SSE без буферизации — `buffer = lines.pop()`
 7. НЕ ставь captureState=true до проверки что процесс жив
 8. НЕ используй `net.fetch` для прокси — баг Electron #44249 (не триггерит login)
-9. НЕ полагайся на session.on('login') + warmup — используй undici ProxyAgent
-10. НЕ ставь `http://` в proxyRules — ломает HTTPS туннель (для Chromium proxy)
+9. НЕ используй Node.js fetch для OpenRouter SSE через прокси — используй net.request
+10. НЕ ставь просто `host:port` в proxyRules — используй `http=host:port;https=host:port`
 11. НЕ переопределяй globalThis.fetch = net.fetch — ломает SSE ReadableStream
 12. НЕ отправляй пустые broadcastSuggestion — вызывает «Продолжение следует»
-13. НЕ отправляй тишину на Whisper — Silence Gate (амплитуда < 400) перед WAV-конвертацией
+13. НЕ отправляй тишину на Whisper — Silence Gate (амплитуда < 1200) перед WAV-конвертацией
+14. НЕ доверяй Whisper без Hallucination Filter — галлюцинации на тишине/шуме
+15. НЕ используй undici@8 с Electron 31 — pin undici@7
 
 ---
 
 ## 10. Следующие шаги
 
-### Приоритет 0 🔴 — Критические баги
-- [ ] Добавить `import { useState, useEffect } from 'react'` в SuggestionPanel.tsx и TranscriptPanel.tsx
-- [ ] Заменить `import React from 'react'` на `import * as React from 'react'` в main.tsx
-- [ ] Исправить suggestionHistory: пары user/assistant вместо только assistant
+### Приоритет 0 🔴 — Проверить на Windows
+- [ ] `git pull` + `npm run dev` — запустить НОВУЮ сборку
+- [ ] Проверить в логе: `[sttService] Silence Gate: порог < 1200/32768, Hallucination Filter: ON`
+- [ ] Проверить в логе: `[proxy] net.request: РАБОТАЕТ` или `ОШИБКА`
+- [ ] Если net.request не работает через прокси — отлаживать session.on('login')
 
 ### Приоритет 1 🔴 — Системный звук без эха
 - [ ] Заменить `win-audio-capture` на `process-loopback` (исходник из native.7z)
@@ -393,3 +435,31 @@ PCM 16000 Hz, 1 канал (моно), 16-bit (s16le)
 - [ ] electron-builder для упаковки
 - [ ] Тесты (vitest)
 - [ ] AudioWorklet вместо ScriptProcessorNode
+
+---
+
+## 11. ПРОМТ ПОМОЩИ для другой нейросети
+
+> **Контекст**: Я разрабатываю Electron-приложение (1C-Copilot) — AI-ассистент для 1С-разработчика на созвонах. Приложение захватывает аудио (микрофон + системный звук), транскрибирует через Groq Whisper API и генерирует подсказки через OpenRouter LLM. Работает через корпоративный HTTP-прокси с авторизацией.
+>
+> **Стек**: Electron 31.7.7, TypeScript, React, electron-vite, Node.js 22.16
+>
+> **Что я НЕ МОГУ решить**:
+>
+> 1. **Electron net.request через HTTP-прокси с авторизацией** — мне нужно чтобы `electron.net.request()` (Chromium network stack) шёл через HTTP-прокси `153.80.159.108:64218` с логином/паролем. Я настроил `session.defaultSession.setProxy({ proxyRules: 'http=host:port;https=host:port' })` и `session.defaultSession.on('login', ...)` с `callback(user, pass)`. Но я не уверен что `net.request` (в отличие от `net.fetch`) реально триггерит `session.on('login')` для прокси-авторизации. Документация Electron молчит. Баг #44249 про `net.fetch` — но про `net.request` ничего. **Вопрос**: работает ли `net.request` + `session.setProxy` + `session.on('login')` для HTTP-прокси с Basic авторизацией? Или это тоже сломано как net.fetch?
+>
+> 2. **Whisper API галлюцинации на тишине** — даже с Silence Gate (порог амплитуды 1200 из 32768), аппаратные наводки микрофона (70-300) проходят и Groq Whisper генерирует текстовые галлюцинации: «Продолжение следует», «Субтитры созданы сообществом», «Спасибо за просмотр» и т.д. Hallucination Filter (пост-фильтр по ключевым фразам) — это пластырь, а не решение. **Вопрос**: как правильно фильтровать тишину/шум перед отправкой на Whisper? Нужен ли Silero VAD или WebRTC VAD? Или лучше переключиться на Deepgram (у которого есть server-side VAD)?
+>
+> 3. **Эхо системного звука** — `win-audio-capture` (WASAPI loopback) захватывает ВСЕ системные звуки, включая звук собственного приложения. Референсный проект ShadowHint использует нативный C++ addon `process-loopback` с `excludeProcessId: process.pid` для исключения собственного процесса. **Вопрос**: как реализовать исключение собственного PID из WASAPI loopback захвата? Есть ли готовый npm-пакет? Или нужно компилировать свой C++ addon?
+>
+> 4. **SSE-стриминг через прокси** — OpenRouter API возвращает Server-Sent Events (stream: true). Через `net.request` + прокси-туннель SSE может обрезаться, терять чанки или зависать. Буферизация `buffer = lines.pop()` помогает от неполных JSON, но не от потери данных. **Вопрос**: надёжен ли SSE-стриминг через `net.request` при прокси-туннеле HTTPS CONNECT? Есть ли подводные камни?
+>
+> 5. **Двойная прокси-архитектура — это нормально?** — STT идёт через `undici ProxyAgent` (Node.js fetch), LLM идёт через `session.setProxy` + `net.request` (Chromium stack). Это выглядит как костыль. **Вопрос**: есть ли единый способ маршрутизировать ВСЕ запросы (и multipart/form-data и SSE) через HTTP-прокси с авторизацией в Electron?
+>
+> **Дополнительный контекст**:
+> - Electron 31.7.7 (Chromium 128)
+> - Прокси: HTTP, Basic auth, не HTTPS
+> - Node.js fetch использует undici@7 (не undici@8 — несовместим с Electron 31)
+> - `net.fetch` НЕ работает с прокси-авторизацией (Electron bug #44249)
+> - `globalThis.fetch = net.fetch` ломает SSE ReadableStream
+> - Windows 10/11, системный звук через WASAPI loopback
